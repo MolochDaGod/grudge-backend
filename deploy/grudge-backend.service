@@ -1,0 +1,17 @@
+[Unit]
+Description=Grudge Studio Unified Backend
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=grudge
+WorkingDirectory=/opt/grudge-backend
+EnvironmentFile=/opt/grudge-backend/.env
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

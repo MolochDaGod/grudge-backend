@@ -1,0 +1,100 @@
+name: Deploy Grudge Backend
+
+on:
+  push:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/grudge-backend
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to GRUDA VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker pull ghcr.io/${{ env.IMAGE_NAME }}:latest
+
+            # Ensure PostgreSQL is running
+            if ! docker ps --format '{{.Names}}' | grep -q '^grudge-postgres$'; then
+              docker volume create grudge-db-data 2>/dev/null || true
+              docker run -d \
+                --name grudge-postgres \
+                --restart unless-stopped \
+                --network grudge-net \
+                -e POSTGRES_DB=grudge_game \
+                -e POSTGRES_USER=grudge \
+                -e POSTGRES_PASSWORD="${{ secrets.DB_PASSWORD }}" \
+                -v grudge-db-data:/var/lib/postgresql/data \
+                postgres:16-alpine
+              sleep 8
+            fi
+
+            # Deploy API container
+            docker stop grudge-backend 2>/dev/null || true
+            docker rm grudge-backend 2>/dev/null || true
+
+            docker network create grudge-net 2>/dev/null || true
+
+            docker run -d \
+              --name grudge-backend \
+              --restart unless-stopped \
+              --network grudge-net \
+              -p 5000:5000 \
+              -e DATABASE_URL="postgresql://grudge:${{ secrets.DB_PASSWORD }}@grudge-postgres:5432/grudge_game" \
+              -e PORT=5000 \
+              -e NODE_ENV=production \
+              -e JWT_SECRET="${{ secrets.JWT_SECRET }}" \
+              -e CROSSMINT_API_KEY="${{ secrets.CROSSMINT_API_KEY }}" \
+              -e DISCORD_CLIENT_ID="${{ secrets.DISCORD_CLIENT_ID }}" \
+              -e DISCORD_CLIENT_SECRET="${{ secrets.DISCORD_CLIENT_SECRET }}" \
+              -e DISCORD_REDIRECT_URI="https://api.grudge-studio.com/auth/discord/callback" \
+              -e GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" \
+              -e CORS_ORIGINS="https://grudgewarlords.com,https://grudge-studio.com" \
+              -e FRONTEND_URL="https://grudgewarlords.com" \
+              ghcr.io/${{ env.IMAGE_NAME }}:latest
+
+            echo "✅ Grudge Backend deployed"
