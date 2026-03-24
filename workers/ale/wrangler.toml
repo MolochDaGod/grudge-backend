@@ -1,0 +1,11 @@
+name = "ale"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# Secrets (set via: npx wrangler secret put SECRET_NAME)
+# ANTHROPIC_API_KEY
+# OPENAI_API_KEY
+
+[vars]
+BACKEND_URL = "http://localhost:5000"
+ALLOWED_ORIGINS = "https://grudgewarlords.com,https://grudge-studio.com,http://localhost:5173"
