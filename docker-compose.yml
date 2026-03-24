@@ -39,17 +39,19 @@ services:
     ports:
       - "5000:5000"
 
-  nginx:
-    image: nginx:alpine
+  # Cloudflare Tunnel - replaces nginx, handles SSL + reverse proxy + DDoS protection
+  # No open inbound ports needed. Outbound-only connection to Cloudflare edge.
+  # Create tunnel at: https://one.dash.cloudflare.com -> Networks -> Tunnels
+  # Map: api.grudge-studio.com -> http://api:5000
+  #       ws.grudge-studio.com  -> http://api:5000 (WebSocket)
+  cloudflared:
+    image: cloudflare/cloudflared:latest
     restart: unless-stopped
     depends_on:
       - api
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./deploy/certs:/etc/nginx/certs:ro
+    command: tunnel run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
 
 volumes:
   pgdata:
