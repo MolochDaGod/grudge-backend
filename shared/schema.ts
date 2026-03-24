@@ -161,6 +161,12 @@ export const characters = pgTable("characters", {
   currentMana: integer("current_mana"),
   currentStamina: integer("current_stamina"),
   avatarUrl: text("avatar_url"),
+
+  // cNFT Integration
+  cnftMintId: varchar("cnft_mint_id", { length: 100 }),
+  cnftMetadataUri: text("cnft_metadata_uri"),
+  cnftStatus: varchar("cnft_status", { length: 20 }), // pending, minted, failed
+
   createdAt: timestamp("created_at").defaultNow(),
 });
 
@@ -380,6 +386,12 @@ export const islands = pgTable("islands", {
   campPosition: jsonb("camp_position"),
   data: jsonb("data"),
   lastVisited: timestamp("last_visited"),
+
+  // cNFT Integration
+  cnftMintId: varchar("cnft_mint_id", { length: 100 }),
+  cnftMetadataUri: text("cnft_metadata_uri"),
+  cnftStatus: varchar("cnft_status", { length: 20 }), // pending, minted, failed
+
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at")
     .defaultNow()

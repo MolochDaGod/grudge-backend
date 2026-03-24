@@ -4,7 +4,8 @@ import { WebSocketServer, WebSocket } from "ws";
 import { eq } from "drizzle-orm";
 import crypto from "crypto";
 import { db } from "./db.js";
-import { users, characters } from "../shared/schema.js";
+import { users, characters, islands } from "../shared/schema.js";
+import { mintCharacterCNFT, mintIslandCNFT } from "./lib/crossmint.js";
 import {
   authMiddleware,
   registerUser,
@@ -316,7 +317,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
           })
           .returning();
 
-        res.status(201).json({ success: true, character });
+        // Auto-mint cNFT (non-blocking — don't fail creation if mint fails)
+        let cnft = null;
+        if (process.env.CROSSMINT_API_KEY) {
+          try {
+            cnft = await mintCharacterCNFT(character.id);
+          } catch (mintError) {
+            console.error("Auto-mint character cNFT failed (non-fatal):", mintError);
+          }
+        }
+
+        res.status(201).json({ success: true, character, cnft });
       } catch (error) {
         console.error("Create character error:", error);
         res.status(500).json({ error: "Server error" });
@@ -341,6 +352,194 @@ export async function registerRoutes(app: Express): Promise<Server> {
       } catch (error) {
         console.error("Delete character error:", error);
         res.status(500).json({ error: "Server error" });
+      }
+    }
+  );
+
+  // ---------- CHARACTER MINT ----------
+
+  app.post(
+    "/api/characters/:id/mint",
+    authMiddleware,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const characterId = req.params.id;
+        const [char] = await db
+          .select()
+          .from(characters)
+          .where(eq(characters.id, characterId))
+          .limit(1);
+
+        if (!char) {
+          return res.status(404).json({ error: "Character not found" });
+        }
+        if (char.userId !== req.user!.userId) {
+          return res.status(403).json({ error: "Not your character" });
+        }
+
+        const result = await mintCharacterCNFT(characterId);
+        res.json({ success: true, ...result });
+      } catch (error: any) {
+        console.error("Mint character error:", error);
+        res.status(500).json({ error: error.message || "Mint failed" });
+      }
+    }
+  );
+
+  // ---------- ISLANDS ----------
+
+  app.get(
+    "/api/islands",
+    authMiddleware,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const islandList = await db
+          .select()
+          .from(islands)
+          .where(eq(islands.userId, req.user!.userId));
+        res.json({ success: true, islands: islandList });
+      } catch (error) {
+        console.error("Get islands error:", error);
+        res.status(500).json({ error: "Server error" });
+      }
+    }
+  );
+
+  app.post(
+    "/api/islands",
+    authMiddleware,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const { name, islandType = "starter", seed } = req.body;
+        const userId = req.user!.userId;
+
+        if (!name) {
+          return res.status(400).json({ error: "Island name required" });
+        }
+
+        // Limit: 3 islands per user
+        const existing = await db
+          .select()
+          .from(islands)
+          .where(eq(islands.userId, userId));
+
+        if (existing.length >= 3) {
+          return res.status(400).json({ error: "Island limit (3) reached" });
+        }
+
+        const [island] = await db
+          .insert(islands)
+          .values({
+            userId,
+            name,
+            islandType,
+            seed: seed || Math.floor(Math.random() * 999999),
+            width: 130,
+            height: 105,
+          })
+          .returning();
+
+        // Mark user as having a home island
+        if (existing.length === 0) {
+          await db
+            .update(users)
+            .set({ hasHomeIsland: true })
+            .where(eq(users.id, userId));
+        }
+
+        // Auto-mint island cNFT (non-blocking)
+        let cnft = null;
+        if (process.env.CROSSMINT_API_KEY) {
+          try {
+            cnft = await mintIslandCNFT(island.id);
+          } catch (mintError) {
+            console.error("Auto-mint island cNFT failed (non-fatal):", mintError);
+          }
+        }
+
+        res.status(201).json({ success: true, island, cnft });
+      } catch (error) {
+        console.error("Create island error:", error);
+        res.status(500).json({ error: "Server error" });
+      }
+    }
+  );
+
+  app.get(
+    "/api/islands/:id",
+    authMiddleware,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const [island] = await db
+          .select()
+          .from(islands)
+          .where(eq(islands.id, req.params.id))
+          .limit(1);
+
+        if (!island) {
+          return res.status(404).json({ error: "Island not found" });
+        }
+        res.json({ success: true, island });
+      } catch (error) {
+        console.error("Get island error:", error);
+        res.status(500).json({ error: "Server error" });
+      }
+    }
+  );
+
+  app.delete(
+    "/api/islands/:id",
+    authMiddleware,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const [island] = await db
+          .select()
+          .from(islands)
+          .where(eq(islands.id, req.params.id))
+          .limit(1);
+
+        if (!island) {
+          return res.status(404).json({ error: "Island not found" });
+        }
+        if (island.userId !== req.user!.userId) {
+          return res.status(403).json({ error: "Not your island" });
+        }
+
+        await db.delete(islands).where(eq(islands.id, req.params.id));
+        res.json({ success: true });
+      } catch (error) {
+        console.error("Delete island error:", error);
+        res.status(500).json({ error: "Server error" });
+      }
+    }
+  );
+
+  // ---------- ISLAND MINT ----------
+
+  app.post(
+    "/api/islands/:id/mint",
+    authMiddleware,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const islandId = req.params.id;
+        const [island] = await db
+          .select()
+          .from(islands)
+          .where(eq(islands.id, islandId))
+          .limit(1);
+
+        if (!island) {
+          return res.status(404).json({ error: "Island not found" });
+        }
+        if (island.userId !== req.user!.userId) {
+          return res.status(403).json({ error: "Not your island" });
+        }
+
+        const result = await mintIslandCNFT(islandId);
+        res.json({ success: true, ...result });
+      } catch (error: any) {
+        console.error("Mint island error:", error);
+        res.status(500).json({ error: error.message || "Mint failed" });
       }
     }
   );
