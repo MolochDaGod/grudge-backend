@@ -1,147 +1,208 @@
 # Grudge Studio — Unified Backend
 
-Single consolidated backend for all Grudge Studio services: authentication, characters, Crossmint wallets, WebSocket game bridge, and more.
+Single consolidated backend for all Grudge Studio services: authentication, characters, economy, crafting, missions, combat, crews, Crossmint wallets, cNFT minting, WebSocket game bridge, and more.
 
 **Created by Racalvin The Pirate King**
 
 ## Architecture
 
 - **Runtime:** Node.js 20 + Express + TypeScript
-- **Database:** PostgreSQL 16 + Drizzle ORM
-- **Auth:** JWT + bcrypt, multi-method (email, guest, puter, Discord OAuth, wallet)
-- **Wallets:** Crossmint server-side wallets (Solana MPC)
-- **Realtime:** WebSocket game bridge with zone/position/chat
-- **Deploy:** Docker + nginx + GitHub Actions CI/CD
+- **Database:** PostgreSQL 16 + Drizzle ORM (auto-migration on startup)
+- **Auth:** JWT + bcrypt — 7 login methods (password, guest, Puter, Discord, Google, GitHub, Solana wallet)
+- **Wallets:** Crossmint MPC wallets (server-side) + Phantom/Solflare/Backpack (Ed25519 nonce signing)
+- **cNFTs:** Compressed NFTs on Solana via Crossmint — auto-minted on character/island creation
+- **Realtime:** WebSocket game bridge (`/ws`) with zone rooms, position sync, chat
+- **Storage:** Cloudflare R2 for avatars, assets, screenshots
+- **Edge:** ALE Cloudflare Worker (`ale.grudge-studio.com`) for AI gateway + R2 CDN
+- **Deploy:** Docker Compose + Cloudflare Tunnel (Zero Trust, no open ports) + GitHub Actions CI/CD
 
-## Quick Start (Local Dev)
+## Quick Start
 
 ```bash
-# 1. Copy env and configure
-cp .env.example .env
-# Edit .env with your DATABASE_URL, JWT_SECRET, etc.
-
-# 2. Install
+cp .env.example .env   # Edit with your secrets
 npm install
-
-# 3. Push schema to database
-npx drizzle-kit push
-
-# 4. Run dev server
-npm run dev
+npx drizzle-kit push   # Create/migrate tables
+npm run dev            # http://localhost:5000
 ```
 
-Server starts at `http://localhost:5000`
+## API Reference
 
-## API Endpoints
+### Authentication
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| POST | `/api/auth/register` | No | Create account (username/password) |
-| POST | `/api/auth/login` | No | Login |
-| POST | `/api/auth/guest` | No | Guest login (auto Grudge ID) |
-| POST | `/api/auth/puter` | No | Puter login |
-| POST | `/api/auth/verify` | No | Verify JWT token |
-| GET | `/auth/discord` | No | Discord OAuth redirect |
-| GET | `/api/characters` | Yes | List user's characters |
-| POST | `/api/characters` | Yes | Create character |
-| DELETE | `/api/characters/:id` | Yes | Delete character |
-| POST | `/api/wallet/create` | Yes | Provision Crossmint wallet |
-| GET | `/api/wallet` | Yes | Get wallet info/balance |
-| GET | `/api/profile` | Yes | Get user profile + Grudge ID |
-| GET | `/api/metadata` | No | Game data (classes, races, weapons) |
-| GET | `/api/health` | No | Health check |
-| WS | `/ws` | Token | Game bridge (zones, positions, chat) |
+```
+POST /api/auth/register     — Create account (username + password)
+POST /api/auth/login        — Login
+POST /api/auth/guest        — Guest login (auto Grudge ID + Puter ID)
+POST /api/auth/puter        — Puter cloud login
+POST /api/auth/verify       — Verify JWT token
+POST /api/auth/wallet       — Solana wallet login (Ed25519 signature verify)
+GET  /api/auth/nonce?wallet=X — Get one-time nonce for wallet signing
+GET  /api/auth/user         — Get profile from Bearer token (Grudge SDK)
+POST /api/auth/logout       — Logout
+
+GET  /auth/discord           — Discord OAuth redirect
+GET  /auth/discord/callback  — Discord OAuth callback
+GET  /auth/google            — Google OAuth redirect
+GET  /auth/google/callback   — Google OAuth callback
+GET  /auth/github            — GitHub OAuth redirect
+GET  /auth/github/callback   — GitHub OAuth callback
+```
+
+### Characters
+
+```
+GET    /api/characters         — List user's characters
+POST   /api/characters         — Create character (auto-mints cNFT)
+PATCH  /api/characters/:id     — Update character (attributes, equipment, name, level, HP/MP/SP)
+DELETE /api/characters/:id     — Delete character
+POST   /api/characters/:id/mint — Mint/re-mint character cNFT
+```
+
+### Islands
+
+```
+GET    /api/islands            — List user's islands
+POST   /api/islands            — Create island (auto-mints cNFT, 3 per user)
+GET    /api/islands/:id        — Get island detail
+DELETE /api/islands/:id        — Delete island
+POST   /api/islands/:id/mint   — Mint/re-mint island cNFT
+```
+
+### Economy
+
+```
+GET  /api/economy/balance?char_id=X  — Gold balance + last 20 transactions
+POST /api/economy/spend              — Deduct gold (purchase, craft)
+POST /api/economy/transfer           — Player-to-player transfer (max 100k)
+POST /api/economy/award    [INT]     — Award gold (missions, loot) — internal key required
+```
+
+### Crafting
+
+```
+GET    /api/crafting/recipes         — All recipes from ObjectStore (?tier=3)
+GET    /api/crafting/queue?char_id=X — Active crafting queue (auto-marks completed)
+POST   /api/crafting/start           — Start craft (validates gold, max 3 concurrent)
+PATCH  /api/crafting/:id/complete [INT] — Complete craft, deliver item
+DELETE /api/crafting/:id             — Cancel craft, 50% gold refund
+```
+
+### Missions
+
+```
+GET    /api/missions                 — List missions (?char_id=X)
+POST   /api/missions                 — Create mission (11 active limit)
+PATCH  /api/missions/:id/complete    — Complete mission (auto gold + XP + level up)
+DELETE /api/missions/:id             — Abandon mission
+```
+
+### Combat
+
+```
+POST /api/combat/log                 — Record combat result (auto-updates PvP stats)
+GET  /api/combat/history?char_id=X   — Combat history
+GET  /api/combat/leaderboard         — Top 25 by kills
+```
+
+### Crews
+
+```
+GET  /api/crews                      — Get player's current crew + members
+POST /api/crews/create               — Create crew (3-5 members)
+POST /api/crews/:id/join             — Join crew
+POST /api/crews/:id/leave            — Leave crew (leader disbands)
+POST /api/crews/:id/claim-base       — Claim island as crew base (Pirate Claim)
+```
+
+### Wallets
+
+```
+POST /api/wallet/create              — Provision Crossmint MPC wallet
+GET  /api/wallet                     — Get wallet info + balance
+POST /api/wallet/link                — Link external wallet (Phantom, Solflare)
+GET  /api/wallet/all                 — List all linked wallets
+```
+
+### Other
+
+```
+GET  /api/profile                    — User profile + Grudge ID
+GET  /api/metadata                   — Game constants (classes, races, weapons, factions)
+GET  /api/health                     — Health check + feature flags
+POST /api/assets/upload              — Upload to R2 (presigned URL)
+GET  /api/assets/:key                — Get asset URL
+POST /api/studio/sync/push           — Push game state to backend
+POST /api/studio/sync/pull           — Pull game state from backend
+WS   /ws                             — WebSocket game bridge (auth → join_zone → position/chat)
+```
+
+`[INT]` = requires `x-internal-key` header (service-to-service calls).
 
 ## Environment Variables
 
-See `.env.example` for all variables. Required:
+See `.env.example` for full list. Key variables:
 
+**Required:**
 - `DATABASE_URL` — PostgreSQL connection string
-- `JWT_SECRET` — 64-char random secret for JWT signing
-- `PORT` — Server port (default: 5000)
+- `JWT_SECRET` — 64-char random string
 
-Optional:
-- `CROSSMINT_API_KEY` — Crossmint server-side API key
-- `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` — Discord OAuth
-- `GEMINI_API_KEY` — AI agents
-- `CORS_ORIGINS` — Comma-separated allowed origins
-- `FRONTEND_URL` — Frontend URL for OAuth redirects
-
-## Deploy to VPS (GRUDA 26.228.21.150)
-
-### Option A: Docker Compose
-
-```bash
-# On VPS
-git clone <repo> /opt/grudge-backend
-cd /opt/grudge-backend
-cp .env.example .env
-# Edit .env with production values
-
-# Place Cloudflare origin cert in deploy/certs/
-# origin.pem and origin-key.pem
-
-docker compose up -d
-```
-
-### Option B: Manual
-
-```bash
-git clone <repo> /opt/grudge-backend
-cd /opt/grudge-backend
-chmod +x deploy-linux.sh
-./deploy-linux.sh
-
-# Start with systemd
-sudo cp deploy/grudge-backend.service /etc/systemd/system/
-sudo systemctl enable --now grudge-backend
-```
-
-### Option C: GitHub Actions (Automatic)
-
-Set these GitHub Secrets:
-- `VPS_HOST` — `26.228.21.150`
-- `VPS_USER` — `grudge`
-- `VPS_SSH_KEY` — SSH private key
-- `DB_PASSWORD` — PostgreSQL password
-- `JWT_SECRET` — JWT signing secret
-- `CROSSMINT_API_KEY` — Crossmint key
+**Auth Providers (optional, each enables a login method):**
 - `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET`
-- `GEMINI_API_KEY`
+- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`
+- `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`
 
-Push to `main` branch to auto-deploy.
+**Crossmint & cNFTs:**
+- `CROSSMINT_API_KEY` — server-side API key from Crossmint dashboard
+- `CROSSMINT_COLLECTION_CHARACTERS` / `CROSSMINT_COLLECTION_ISLANDS`
 
-### Cloudflare DNS
+**Infrastructure:**
+- `CLOUDFLARE_TUNNEL_TOKEN` — Cloudflare Zero Trust tunnel
+- `R2_ACCOUNT_ID` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` — R2 storage
+- `INTERNAL_API_KEY` — service-to-service auth for economy/combat/crafting internal endpoints
 
-Add CNAME record in Cloudflare:
-- `api.grudge-studio.com` → `26.228.21.150` (or A record)
-- Proxy status: Proxied (orange cloud)
+## Deploy
 
-## Database Schema
+### Docker Compose (recommended)
 
-16 tables covering:
-- **users** — accounts with Grudge ID, wallet, faction
-- **auth_tokens** — JWT session management
-- **auth_providers** — Discord/Puter/Google OAuth linking
-- **characters** — RPG characters with attributes, equipment
-- **inventory_items** — character inventory
-- **crafted_items** — crafted gear
-- **unlocked_skills** / **unlocked_recipes** — progression
-- **crafting_jobs** — active crafting
-- **shop_transactions** — purchase history
-- **islands** — player islands
-- **ai_agents** — NPC/companion AI
-- **game_sessions** / **afk_jobs** — session tracking
-- **uuid_ledger** / **resource_ledger** — audit trails
-- **battle_arena_stats** — PvP stats
+```bash
+git clone https://github.com/MolochDaGod/grudge-backend.git /opt/grudge-backend
+cd /opt/grudge-backend
+cp .env.example .env   # Edit with production values
+docker compose up -d   # Starts: PostgreSQL + API + Cloudflare Tunnel
+```
+
+The Dockerfile auto-runs `drizzle-kit push` on startup — schema is always in sync.
+
+### GitHub Actions (CI/CD)
+
+Push to `main` → builds Docker image → pushes to GHCR → SSH deploys to VPS.
+Also supports `workflow_dispatch` for manual triggers.
+
+Set secrets: `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, `DB_PASSWORD`, `JWT_SECRET`, `CROSSMINT_API_KEY`, `CROSSMINT_COLLECTION_CHARACTERS`, `CROSSMINT_COLLECTION_ISLANDS`, `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, `GEMINI_API_KEY`.
+
+### Cloudflare Tunnel
+
+No open ports needed. The `cloudflared` container creates an outbound tunnel to Cloudflare edge.
+Configure at https://one.dash.cloudflare.com → Networks → Tunnels:
+- `api.grudge-studio.com` → `http://api:5000`
+- `ws.grudge-studio.com` → `http://api:5000` (WebSocket enabled)
+
+## Database Schema (21 tables)
+
+**Core:** users, wallets, wallet_nonces, auth_tokens, auth_providers
+**Characters:** characters, inventory_items, crafted_items, unlocked_skills, unlocked_recipes
+**Game Systems:** gold_transactions, crafting_jobs, missions, crews, crew_members, combat_log, battle_arena_stats
+**World:** islands, ai_agents, game_sessions, afk_jobs
+**Audit:** uuid_ledger, resource_ledger, shop_transactions
 
 ## Scripts
 
 ```bash
-npm run dev        # Dev server with hot reload
-npm run build      # Production build (esbuild)
-npm run start      # Start production server
-npm run check      # TypeScript type check
-npm run db:push    # Push schema to database
-npm run db:generate # Generate migration files
+npm run dev          # Dev server with hot reload (tsx watch)
+npm run build        # Production build (esbuild)
+npm run start        # Start production server
+npm run check        # TypeScript type check
+npm run db:push      # Push schema to database
+npm run db:generate  # Generate migration files
+npm run db:migrate   # Run migrations
 ```
