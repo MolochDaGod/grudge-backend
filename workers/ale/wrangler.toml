@@ -1,11 +1,37 @@
-name = "ale"
+name = "grudge-ai-hub"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 
-# Secrets (set via: npx wrangler secret put SECRET_NAME)
+# Deployed to: ai.grudge-studio.com
+# Also available at: grudge-ai-hub.grudge.workers.dev
+
+# --- Secrets (set via: npx wrangler secret put SECRET_NAME) ---
 # ANTHROPIC_API_KEY
 # OPENAI_API_KEY
+# CF_AI_TOKEN     <- Cloudflare AI REST token (cfut_... user token)
 
 [vars]
-BACKEND_URL = "http://localhost:5000"
-ALLOWED_ORIGINS = "https://grudgewarlords.com,https://grudge-studio.com,http://localhost:5173"
+BACKEND_URL = "https://api.grudge-studio.com"
+CF_ACCOUNT_ID = "ee475864561b02d4588180b8b9acf694"
+ALLOWED_ORIGINS = "https://grudgewarlords.com,https://grudge-studio.com,https://dash.grudge-studio.com,https://grudge-warlords-game.vercel.app,https://grim-armada-web.vercel.app,https://gruda-wars.vercel.app,http://localhost:5173,http://localhost:3000,http://localhost:5000"
+
+# Cloudflare Workers AI binding
+[ai]
+binding = "AI"
+
+# KV namespace for rate limiting
+# Create with: npx wrangler kv namespace create RATE_LIMIT
+# Then replace the id below with the output id
+[[kv_namespaces]]
+binding = "RATE_LIMIT"
+id = "cd5d88c2008f408f990f6f8039b53399"
+
+# R2 Object Storage binding
+[[r2_buckets]]
+binding = "ASSETS"
+bucket_name = "grudge-assets"
+
+# Custom domain routing
+[[routes]]
+pattern = "ai.grudge-studio.com/*"
+zone_name = "grudge-studio.com"

@@ -19,6 +19,9 @@ import {
   type AuthenticatedRequest,
 } from "./auth.js";
 import walletRouter from "./routes/wallet.js";
+import walletAuthRouter from "./routes/wallet-auth.js";
+import studioSyncRouter from "./routes/studio-sync.js";
+import assetsRouter from "./routes/assets.js";
 
 // ============================================
 // GAME CONSTANTS
@@ -182,6 +185,57 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.json({ valid: true, user: decoded });
   });
 
+  // GET /api/auth/user — return profile from Bearer token (used by Grudge SDK)
+  app.get(
+    "/api/auth/user",
+    authMiddleware,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const [user] = await db
+          .select({
+            id: users.id,
+            username: users.username,
+            displayName: users.displayName,
+            email: users.email,
+            avatarUrl: users.avatarUrl,
+            isGuest: users.isGuest,
+            isPremium: users.isPremium,
+            faction: users.faction,
+            hasHomeIsland: users.hasHomeIsland,
+          })
+          .from(users)
+          .where(eq(users.id, req.user!.userId))
+          .limit(1);
+
+        if (!user) return res.status(404).json({ error: "User not found" });
+        const grudgeId = generateGrudgeId(user.id);
+        res.json({ success: true, ...user, grudgeId });
+      } catch (error) {
+        console.error("Get auth user error:", error);
+        res.status(500).json({ error: "Server error" });
+      }
+    }
+  );
+
+  // POST /api/auth/logout — revoke token
+  app.post("/api/auth/logout", (req, res) => {
+    // JWT is stateless; client drops the token.
+    // If a db token was tracked it would be revoked here.
+    res.json({ success: true, message: "Logged out" });
+  });
+
+  // ---------- /auth/* ALIASES (id-domain compat) ----------
+  // Allows id.grudge-studio.com (CNAME → api.grudge-studio.com) to serve
+  // auth requests without the /api prefix.
+  app.post("/auth/login",    (req, res) => res.redirect(307, "/api/auth/login"));
+  app.post("/auth/register", (req, res) => res.redirect(307, "/api/auth/register"));
+  app.post("/auth/guest",    (req, res) => res.redirect(307, "/api/auth/guest"));
+  app.post("/auth/puter",    (req, res) => res.redirect(307, "/api/auth/puter"));
+  app.post("/auth/verify",   (req, res) => res.redirect(307, "/api/auth/verify"));
+  app.get("/auth/user",      (req, res) => res.redirect(307, "/api/auth/user"));
+  app.post("/auth/logout",   (req, res) => res.redirect(307, "/api/auth/logout"));
+  app.post("/auth/wallet",   (req, res) => res.redirect(307, "/api/auth/wallet"));
+
   // ---------- DISCORD OAUTH ----------
 
   app.get("/auth/discord", (_req, res) => {
@@ -340,14 +394,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
     authMiddleware,
     async (req: AuthenticatedRequest, res) => {
       try {
-        const result = await db
-          .delete(characters)
+        // Fetch first to enforce ownership
+        const [char] = await db
+          .select()
+          .from(characters)
           .where(eq(characters.id, req.params.id))
-          .returning();
+          .limit(1);
 
-        if (result.length === 0) {
+        if (!char) {
           return res.status(404).json({ error: "Character not found" });
         }
+        if (char.userId !== req.user!.userId) {
+          return res.status(403).json({ error: "Not your character" });
+        }
+
+        await db.delete(characters).where(eq(characters.id, req.params.id));
         res.json({ success: true });
       } catch (error) {
         console.error("Delete character error:", error);
@@ -548,6 +609,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.use("/api/wallet", walletRouter);
 
+  // Wallet auth (nonce + Phantom/Web3Auth/Solflare verify)
+  app.get("/api/auth/nonce", (req, res, next) => walletAuthRouter(req, res, next));
+  app.post("/api/auth/wallet", (req, res, next) => walletAuthRouter(req, res, next));
+  app.use("/api/wallet", walletAuthRouter); // /api/wallet/link, /api/wallet/all
+
+  // ---------- STUDIO SYNC ----------
+
+  app.use("/api/studio/sync", studioSyncRouter);
+
+  // ---------- ASSET STORAGE (R2) ----------
+
+  app.use("/api/assets", assetsRouter);
+
   // ---------- METADATA ----------
 
   app.get("/api/metadata", (_req, res) => {
@@ -615,6 +689,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         crossmint: !!process.env.CROSSMINT_API_KEY,
         websocket: true,
         ai: !!process.env.GEMINI_API_KEY,
+        walletAuth: true,
+        studioSync: true,
+        objectStorage: !!(process.env.R2_ACCOUNT_ID && process.env.R2_ACCESS_KEY_ID),
+        puterSync: !!process.env.PUTER_API_TOKEN,
       },
     });
   });

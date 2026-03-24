@@ -9,6 +9,8 @@ import {
   timestamp,
   bigint,
   serial,
+  index,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -27,14 +29,17 @@ export const users = pgTable("users", {
   displayName: varchar("display_name", { length: 100 }),
   avatarUrl: text("avatar_url"),
 
+  // Computed + stored Grudge ID (GRUDGE_XXXXXXXXXXXX)
+  grudgeId: varchar("grudge_id", { length: 30 }),
+
   // External Auth Identifiers
   puterId: varchar("puter_id", { length: 100 }),
-  walletAddress: varchar("wallet_address", { length: 100 }),
+  walletAddress: varchar("wallet_address", { length: 100 }), // primary wallet (legacy compat)
 
-  // Crossmint Wallet Integration
+  // Crossmint Wallet Integration (primary custodial wallet)
   crossmintWalletId: varchar("crossmint_wallet_id", { length: 100 }),
   crossmintEmail: varchar("crossmint_email", { length: 255 }),
-  walletType: varchar("wallet_type", { length: 20 }), // crossmint, phantom, etc.
+  walletType: varchar("wallet_type", { length: 20 }), // crossmint, phantom, web3auth, etc.
 
   // Faction
   faction: varchar("faction", { length: 20 }), // order, chaos, neutral
@@ -55,6 +60,57 @@ export const users = pgTable("users", {
   lastLoginAt: timestamp("last_login_at"),
 });
 
+// ============================================
+// WALLETS TABLE — multi-wallet support per user
+// ============================================
+
+export const wallets = pgTable("wallets", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  walletAddress: varchar("wallet_address", { length: 100 }).notNull(),
+  walletType: varchar("wallet_type", { length: 30 }).notNull(),
+  // crossmint | phantom | solflare | web3auth | backpack | custom
+  walletNetwork: varchar("wallet_network", { length: 20 }).default("mainnet"),
+  // mainnet | devnet | testnet
+  isPrimary: boolean("is_primary").default(false),
+  isVerified: boolean("is_verified").default(false),
+  crossmintWalletId: varchar("crossmint_wallet_id", { length: 100 }),
+  web3authVerifier: varchar("web3auth_verifier", { length: 100 }),
+  label: varchar("label", { length: 50 }), // user-defined label
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  walletAddressIdx: index("wallets_address_idx").on(table.walletAddress),
+  walletUserIdx: index("wallets_user_idx").on(table.userId),
+  walletUnique: uniqueIndex("wallets_user_address_unique").on(table.userId, table.walletAddress),
+}));
+
+export const walletsRelations = relations(wallets, ({ one }) => ({
+  user: one(users, { fields: [wallets.userId], references: [users.id] }),
+}));
+
+// ============================================
+// NONCE STORE — one-time wallet challenge nonces
+// ============================================
+
+export const walletNonces = pgTable("wallet_nonces", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  walletAddress: varchar("wallet_address", { length: 100 }).notNull(),
+  nonce: varchar("nonce", { length: 64 }).notNull().unique(),
+  expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
+  usedAt: bigint("used_at", { mode: "number" }),
+  createdAt: bigint("created_at", { mode: "number" })
+    .notNull()
+    .$defaultFn(() => Date.now()),
+}, (table) => ({
+  nonceWalletIdx: index("nonces_wallet_idx").on(table.walletAddress),
+}));
+
 export const usersRelations = relations(users, ({ many }) => ({
   characters: many(characters),
   islands: many(islands),
@@ -64,6 +120,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   authTokens: many(authTokens),
   authProviders: many(authProviders),
   battleArenaStats: many(battleArenaStats),
+  wallets: many(wallets),
 }));
 
 // ============================================
@@ -652,6 +709,7 @@ export const insertUserSchema = createInsertSchema(users).omit({ id: true, creat
 export const insertCharacterSchema = createInsertSchema(characters).omit({ id: true, createdAt: true });
 export const insertAuthTokenSchema = createInsertSchema(authTokens).omit({ id: true });
 export const insertAuthProviderSchema = createInsertSchema(authProviders).omit({ id: true, createdAt: true });
+export const insertWalletSchema = createInsertSchema(wallets).omit({ id: true, createdAt: true });
 
 // ============================================
 // TYPES
@@ -667,3 +725,6 @@ export type Island = typeof islands.$inferSelect;
 export type AiAgent = typeof aiAgents.$inferSelect;
 export type GameSession = typeof gameSessions.$inferSelect;
 export type BattleArenaStat = typeof battleArenaStats.$inferSelect;
+export type Wallet = typeof wallets.$inferSelect;
+export type InsertWallet = z.infer<typeof insertWalletSchema>;
+export type WalletNonce = typeof walletNonces.$inferSelect;

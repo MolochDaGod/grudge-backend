@@ -1,0 +1,22 @@
+{
+  "rules": [
+  {
+    "allowedOrigins": [
+      "https://grudgewarlords.com",
+      "https://grudge-studio.com",
+      "https://dash.grudge-studio.com",
+      "https://warlord-crafting-suite.vercel.app",
+      "https://gdevelop-assistant.vercel.app",
+      "https://grudachain-rho.vercel.app",
+      "https://ai.grudge-studio.com",
+      "http://localhost:5173",
+      "http://localhost:3000",
+      "http://localhost:5000"
+    ],
+    "allowedMethods": ["GET", "PUT", "POST", "DELETE", "HEAD"],
+    "allowedHeaders": ["*"],
+    "exposeHeaders": ["ETag", "Content-Type", "Content-Length"],
+    "maxAgeSeconds": 86400
+  }
+  ]
+}

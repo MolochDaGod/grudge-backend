@@ -1,21 +1,56 @@
 /**
  * ALE - Grudge Studio Edge AI Gateway
- * Cloudflare Worker at ale.grudge.workers.dev
+ * Cloudflare Worker — ai.grudge-studio.com / grudge-ai-hub.grudge.workers.dev
  *
  * Routes:
  *   GET  /              - Status + available endpoints
- *   POST /ai/chat       - AI chat proxy (Anthropic Claude)
- *   POST /ai/complete   - AI completion proxy (OpenAI)
- *   ANY  /api/*         - Proxy to grudge-backend
- *   GET  /health        - Backend health check relay
+ *   POST /ai/chat       - Anthropic Claude proxy
+ *   POST /ai/complete   - OpenAI proxy
+ *   POST /ai/cf         - Cloudflare Workers AI (llama-3, etc.)
+ *   ANY  /api/*         - Proxy to Grudge Backend (api.grudge-studio.com)
+ *   GET  /health        - Backend health relay
  */
+
+// Minimal type shim for the Workers AI binding
+type AiTextGenerationInput = {
+  messages: { role: string; content: string }[];
+  max_tokens?: number;
+};
+type AiTextGenerationOutput = {
+  response?: string;
+};
+interface AiBinding {
+  run(
+    model: string,
+    input: AiTextGenerationInput
+  ): Promise<AiTextGenerationOutput>;
+}
+
+interface R2Object {
+  key: string;
+  size: number;
+  etag: string;
+  httpMetadata?: { contentType?: string };
+  body: ReadableStream;
+  arrayBuffer(): Promise<ArrayBuffer>;
+}
+interface R2Bucket {
+  put(key: string, value: ReadableStream | ArrayBuffer | string, opts?: { httpMetadata?: { contentType?: string }; customMetadata?: Record<string, string> }): Promise<void>;
+  get(key: string): Promise<R2Object | null>;
+  delete(key: string): Promise<void>;
+  list(opts?: { prefix?: string; limit?: number }): Promise<{ objects: { key: string; size: number; etag: string }[] }>;
+}
 
 interface Env {
   ANTHROPIC_API_KEY: string;
   OPENAI_API_KEY: string;
+  CF_AI_TOKEN: string;   // cfut_... secret — used as fallback REST token
+  CF_ACCOUNT_ID: string; // set in [vars] — ee475864...
   BACKEND_URL: string;
   ALLOWED_ORIGINS: string;
   RATE_LIMIT: KVNamespace;
+  AI: AiBinding;         // Cloudflare Workers AI binding
+  ASSETS: R2Bucket;      // grudge-assets R2 bucket
 }
 
 // ============================================
@@ -100,7 +135,7 @@ async function handleAnthropicChat(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: body.model || "claude-sonnet-4-20250514",
+      model: body.model || "claude-3-5-sonnet-20241022",
       max_tokens: body.max_tokens || 1024,
       system:
         body.system ||
@@ -195,6 +230,181 @@ async function handleOpenAIComplete(
 }
 
 // ============================================
+// R2 ASSET HANDLERS
+// ============================================
+
+const ASSETS_PUBLIC = "https://assets.grudge-studio.com";
+const ALLOWED_EXTS = new Set(["png","jpg","jpeg","gif","webp","mp3","ogg","wav","glb","gltf","vox"]);
+const EXT_MIME: Record<string,string> = {
+  png:"image/png", jpg:"image/jpeg", jpeg:"image/jpeg",
+  gif:"image/gif", webp:"image/webp",
+  mp3:"audio/mpeg", ogg:"audio/ogg", wav:"audio/wav",
+  glb:"model/gltf-binary", gltf:"model/gltf+json",
+  vox:"application/octet-stream",
+};
+
+/** PUT /assets/upload?key=players/GRUDGE_XXX/avatar.png
+ *  Body = raw file bytes. Returns { publicUrl }.
+ *  Or POST /assets/upload with JSON { filename, category, grudgeId } for a metadata-only key reservation. */
+async function handleAssetUpload(request: Request, env: Env): Promise<Response> {
+  if (!env.ASSETS) return Response.json({ error: "R2 not configured" }, { status: 503 });
+
+  const url = new URL(request.url);
+
+  if (request.method === "PUT") {
+    // Direct binary upload — client sends raw bytes
+    const key = url.searchParams.get("key");
+    if (!key) return Response.json({ error: "key query param required" }, { status: 400 });
+
+    const ext = key.split(".").pop()?.toLowerCase() || "";
+    if (!ALLOWED_EXTS.has(ext)) return Response.json({ error: `File type .${ext} not allowed` }, { status: 400 });
+
+    const contentType = request.headers.get("Content-Type") || EXT_MIME[ext] || "application/octet-stream";
+    await env.ASSETS.put(key, request.body as ReadableStream, { httpMetadata: { contentType } });
+
+    return Response.json({
+      success: true,
+      key,
+      publicUrl: `${ASSETS_PUBLIC}/${key}`,
+    });
+  }
+
+  if (request.method === "POST") {
+    // Returns a key the client should use for a subsequent PUT
+    const body = await request.json() as { filename?: string; category?: string; grudgeId?: string };
+    const { filename, category = "general", grudgeId = "guest" } = body;
+    if (!filename) return Response.json({ error: "filename required" }, { status: 400 });
+
+    const ext = filename.split(".").pop()?.toLowerCase() || "";
+    if (!ALLOWED_EXTS.has(ext)) return Response.json({ error: `File type .${ext} not allowed` }, { status: 400 });
+
+    const safe = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const key = `players/${grudgeId}/${category}/${Date.now()}-${safe}`;
+    const uploadUrl = `https://ai.grudge-studio.com/assets/upload?key=${encodeURIComponent(key)}`;
+
+    return Response.json({
+      success: true,
+      key,
+      uploadUrl,
+      publicUrl: `${ASSETS_PUBLIC}/${key}`,
+      method: "PUT",
+      contentType: EXT_MIME[ext] || "application/octet-stream",
+    });
+  }
+
+  return Response.json({ error: "PUT or POST required" }, { status: 405 });
+}
+
+/** GET /assets/list?prefix=players/GRUDGE_XXX */
+async function handleAssetList(request: Request, env: Env): Promise<Response> {
+  if (!env.ASSETS) return Response.json({ error: "R2 not configured" }, { status: 503 });
+  const url = new URL(request.url);
+  const prefix = url.searchParams.get("prefix") || "";
+  const result = await env.ASSETS.list({ prefix, limit: 100 });
+  return Response.json({
+    success: true,
+    assets: result.objects.map((o) => ({
+      key: o.key,
+      size: o.size,
+      etag: o.etag,
+      url: `${ASSETS_PUBLIC}/${o.key}`,
+    })),
+  });
+}
+
+// ============================================
+// CLOUDFLARE WORKERS AI HANDLER
+// ============================================
+
+async function handleCFAI(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  const body = (await request.json()) as {
+    messages?: { role: string; content: string }[];
+    message?: string;
+    system?: string;
+    model?: string;
+    max_tokens?: number;
+  };
+
+  const model = body.model || "@cf/meta/llama-3-8b-instruct";
+
+  // Build messages array
+  const messages: { role: string; content: string }[] = [];
+  if (body.system) {
+    messages.push({ role: "system", content: body.system });
+  } else {
+    messages.push({
+      role: "system",
+      content:
+        "You are ALE, the AI assistant for Grudge Warlords — a souls-like MMO with islands, factions, crafting, and 5 classes (Warrior, Mage, Ranger, Rogue, Worge).",
+    });
+  }
+
+  if (body.messages) {
+    messages.push(...body.messages);
+  } else if (body.message) {
+    messages.push({ role: "user", content: body.message });
+  } else {
+    return Response.json({ error: "message or messages required" }, { status: 400 });
+  }
+
+  // Prefer the Workers AI binding (zero cost, no external call)
+  if (env.AI) {
+    try {
+      const result = await env.AI.run(model, {
+        messages,
+        max_tokens: body.max_tokens || 512,
+      });
+      return Response.json({
+        success: true,
+        response: result.response || "",
+        model,
+        source: "workers-ai-binding",
+      });
+    } catch (err) {
+      console.error("Workers AI binding error:", err);
+      // Fall through to REST fallback
+    }
+  }
+
+  // REST fallback — uses CF_AI_TOKEN secret
+  if (!env.CF_AI_TOKEN || !env.CF_ACCOUNT_ID) {
+    return Response.json({ error: "Cloudflare AI not configured" }, { status: 503 });
+  }
+
+  const cfRes = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/ai/run/${model}`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.CF_AI_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ messages }),
+    }
+  );
+
+  if (!cfRes.ok) {
+    const err = await cfRes.text();
+    console.error("CF AI REST error:", cfRes.status, err);
+    return Response.json(
+      { error: "Cloudflare AI request failed", status: cfRes.status },
+      { status: 502 }
+    );
+  }
+
+  const cfData = (await cfRes.json()) as { result?: { response?: string } };
+  return Response.json({
+    success: true,
+    response: cfData.result?.response || "",
+    model,
+    source: "workers-ai-rest",
+  });
+}
+
+// ============================================
 // API PROXY
 // ============================================
 
@@ -241,18 +451,21 @@ export default {
     if (path === "/" || path === "") {
       return Response.json(
         {
-          service: "ALE - Grudge Studio Edge AI Gateway",
+          service: "ALE — Grudge Studio Edge AI Gateway",
           status: "online",
-          version: "1.0.0",
+          version: "2.0.0",
           endpoints: {
-            "POST /ai/chat": "Anthropic Claude chat (message, system?, model?)",
-            "POST /ai/complete": "OpenAI completion (prompt, system?, model?)",
-            "ANY /api/*": "Proxy to Grudge Backend",
-            "GET /health": "Backend health relay",
+            "POST /ai/chat": "Anthropic Claude (message, system?, model?, max_tokens?)",
+            "POST /ai/complete": "OpenAI GPT (prompt, system?, model?, max_tokens?)",
+            "POST /ai/cf": "Cloudflare Workers AI (message|messages, model?, system?, max_tokens?)",
+            "ANY  /api/*": "Proxy to Grudge Backend",
+            "GET  /health": "Backend health relay",
           },
           features: {
             anthropic: !!env.ANTHROPIC_API_KEY,
             openai: !!env.OPENAI_API_KEY,
+            cloudflareAI: !!(env.AI || env.CF_AI_TOKEN),
+            r2Storage: !!env.ASSETS,
             rateLimit: !!env.RATE_LIMIT,
           },
           timestamp: new Date().toISOString(),
@@ -312,6 +525,40 @@ export default {
         );
       }
       const res = await handleOpenAIComplete(request, env);
+      return new Response(res.body, {
+        status: res.status,
+        headers: { ...Object.fromEntries(res.headers), ...cors },
+      });
+    }
+
+    // Assets — R2 upload (PUT/POST) and list (GET)
+    if (path === "/assets/upload") {
+      const res = await handleAssetUpload(request, env);
+      return new Response(res.body, {
+        status: res.status,
+        headers: { ...Object.fromEntries(res.headers), ...cors },
+      });
+    }
+
+    if (path === "/assets/list" && request.method === "GET") {
+      const res = await handleAssetList(request, env);
+      return new Response(res.body, {
+        status: res.status,
+        headers: { ...Object.fromEntries(res.headers), ...cors },
+      });
+    }
+
+    // AI CF (Cloudflare Workers AI)
+    if (path === "/ai/cf" && request.method === "POST") {
+      const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+      const rateCheck = await checkRateLimit(env, `ai:${ip}`, 60, 60);
+      if (!rateCheck.allowed) {
+        return Response.json(
+          { error: "Rate limit exceeded. Try again in 60s." },
+          { status: 429, headers: cors }
+        );
+      }
+      const res = await handleCFAI(request, env);
       return new Response(res.body, {
         status: res.status,
         headers: { ...Object.fromEntries(res.headers), ...cors },

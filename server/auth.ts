@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
-import { eq, and, gt } from "drizzle-orm";
+import { eq, and, lt } from "drizzle-orm";
 import { db } from "./db.js";
 import { users, authTokens, authProviders } from "../shared/schema.js";
 
@@ -113,7 +113,8 @@ export async function revokeAllUserTokens(userId: string): Promise<void> {
 }
 
 export async function cleanupExpiredTokens(): Promise<void> {
-  await db.delete(authTokens).where(gt(Date.now(), authTokens.expiresAt));
+  // Delete tokens where expiresAt < now (token is expired)
+  await db.delete(authTokens).where(lt(authTokens.expiresAt, Date.now()));
 }
 
 // ============================================
