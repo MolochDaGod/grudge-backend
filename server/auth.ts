@@ -80,9 +80,58 @@ export function authMiddleware(
 // DB TOKEN MANAGEMENT
 // ============================================
 
+// ============================================
+// AUTH RESPONSE BUILDER
+// ============================================
+
+/** Single canonical shape returned by every auth endpoint */
+export interface AuthResponse {
+  success: true;
+  token: string;
+  user: {
+    id: string;
+    grudgeId: string;
+    username: string;
+    displayName: string | null;
+    email: string | null;
+    avatarUrl: string | null;
+    isGuest: boolean;
+    isPremium: boolean;
+    faction: string | null;
+    walletAddress: string | null;
+    hasHomeIsland: boolean;
+    providers: string[]; // e.g. ["discord", "puter", "phantom"]
+  };
+}
+
+export async function buildAuthResponse(
+  user: typeof import("../shared/schema.js").users.$inferSelect,
+  token: string,
+  providers: string[] = []
+): Promise<AuthResponse> {
+  return {
+    success: true,
+    token,
+    user: {
+      id: user.id,
+      grudgeId: user.grudgeId || generateGrudgeId(user.id),
+      username: user.username,
+      displayName: user.displayName ?? null,
+      email: user.email ?? null,
+      avatarUrl: user.avatarUrl ?? null,
+      isGuest: user.isGuest ?? false,
+      isPremium: user.isPremium ?? false,
+      faction: user.faction ?? null,
+      walletAddress: user.walletAddress ?? null,
+      hasHomeIsland: user.hasHomeIsland ?? false,
+      providers,
+    },
+  };
+}
+
 export async function createDbToken(
   userId: string,
-  tokenType: "standard" | "guest" | "wallet" | "puter",
+  tokenType: "standard" | "guest" | "wallet" | "puter" | "discord" | "google" | "github",
   expiryDays = 7
 ): Promise<string> {
   const token = crypto.randomUUID().replace(/-/g, "");
@@ -142,6 +191,11 @@ export async function registerUser(
 
   const hashedPassword = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
+  const grudgeId = generateGrudgeId(
+    // We need the UUID first — insert then update grudgeId
+    crypto.randomUUID() // placeholder; overwritten after insert
+  );
+
   const [user] = await db
     .insert(users)
     .values({
@@ -152,17 +206,19 @@ export async function registerUser(
     })
     .returning();
 
-  const grudgeId = generateGrudgeId(user.id);
+  const realGrudgeId = generateGrudgeId(user.id);
+  await db.update(users).set({ grudgeId: realGrudgeId }).where(eq(users.id, user.id));
+
   const token = generateJwt({
     userId: user.id,
     username: user.username,
-    grudgeId,
+    grudgeId: realGrudgeId,
     isGuest: false,
   });
 
   await createDbToken(user.id, "standard");
 
-  return { user, token };
+  return { user: { ...user, grudgeId: realGrudgeId }, token };
 }
 
 /**
@@ -194,6 +250,8 @@ export async function loginUser(
     .where(eq(users.id, user.id));
 
   const grudgeId = generateGrudgeId(user.id);
+  await db.update(users).set({ grudgeId, lastLoginAt: new Date() }).where(eq(users.id, user.id));
+
   const token = generateJwt({
     userId: user.id,
     username: user.username,
@@ -201,7 +259,7 @@ export async function loginUser(
     isGuest: false,
   });
 
-  return { user, token };
+  return { user: { ...user, grudgeId }, token };
 }
 
 /**
@@ -224,6 +282,8 @@ export async function guestLogin(): Promise<{
     .returning();
 
   const grudgeId = generateGrudgeId(user.id);
+  await db.update(users).set({ grudgeId }).where(eq(users.id, user.id));
+
   const token = generateJwt({
     userId: user.id,
     username: user.username,
@@ -233,7 +293,7 @@ export async function guestLogin(): Promise<{
 
   await createDbToken(user.id, "guest");
 
-  return { user, token };
+  return { user: { ...user, grudgeId }, token };
 }
 
 /**
@@ -280,6 +340,8 @@ export async function puterLogin(
   }
 
   const grudgeId = generateGrudgeId(user.id);
+  await db.update(users).set({ grudgeId, lastLoginAt: new Date() }).where(eq(users.id, user.id));
+
   const token = generateJwt({
     userId: user.id,
     username: user.username,
@@ -289,11 +351,11 @@ export async function puterLogin(
 
   await createDbToken(user.id, "puter");
 
-  return { user, token };
+  return { user: { ...user, grudgeId }, token };
 }
 
 /**
- * Discord OAuth — find or create user from Discord profile
+ * Discord OAuth
  */
 export async function discordLogin(discordUser: {
   id: string;
@@ -351,6 +413,8 @@ export async function discordLogin(discordUser: {
   }
 
   const grudgeId = generateGrudgeId(user.id);
+  await db.update(users).set({ grudgeId, lastLoginAt: new Date() }).where(eq(users.id, user.id));
+
   const token = generateJwt({
     userId: user.id,
     username: user.username,
@@ -358,7 +422,132 @@ export async function discordLogin(discordUser: {
     isGuest: false,
   });
 
-  await createDbToken(user.id, "standard");
+  await createDbToken(user.id, "discord");
 
-  return { user, token };
+  return { user: { ...user, grudgeId }, token };
+}
+
+// ============================================
+// OAUTH PROVIDER HELPER
+// ============================================
+
+async function oauthFindOrCreate(opts: {
+  provider: string;
+  providerId: string;
+  username: string;
+  email?: string | null;
+  displayName?: string | null;
+  avatarUrl?: string | null;
+  profileData?: Record<string, unknown>;
+  tokenType: "discord" | "google" | "github";
+}): Promise<{ user: typeof users.$inferSelect; token: string }> {
+  const [existingProvider] = await db
+    .select()
+    .from(authProviders)
+    .where(
+      and(
+        eq(authProviders.provider, opts.provider),
+        eq(authProviders.providerId, opts.providerId)
+      )
+    )
+    .limit(1);
+
+  let user: typeof users.$inferSelect;
+
+  if (existingProvider) {
+    const [found] = await db
+      .select()
+      .from(users)
+      .where(eq(users.id, existingProvider.accountId))
+      .limit(1);
+    user = found;
+  } else {
+    // Check if email already has an account — link instead of duplicate
+    let existing: typeof users.$inferSelect | undefined;
+    if (opts.email) {
+      const [byEmail] = await db.select().from(users).where(eq(users.email, opts.email)).limit(1);
+      existing = byEmail;
+    }
+
+    if (existing) {
+      user = existing;
+    } else {
+      const [created] = await db
+        .insert(users)
+        .values({
+          username: opts.username,
+          email: opts.email || null,
+          displayName: opts.displayName || opts.username,
+          avatarUrl: opts.avatarUrl || null,
+          isGuest: false,
+          emailVerified: !!opts.email,
+        })
+        .returning();
+      user = created;
+    }
+
+    await db.insert(authProviders).values({
+      accountId: user.id,
+      provider: opts.provider,
+      providerId: opts.providerId,
+      profileData: opts.profileData,
+    });
+  }
+
+  const grudgeId = generateGrudgeId(user.id);
+  await db
+    .update(users)
+    .set({ grudgeId, lastLoginAt: new Date(),
+      ...(opts.avatarUrl && !user.avatarUrl ? { avatarUrl: opts.avatarUrl } : {}),
+      ...(opts.email && !user.email ? { email: opts.email, emailVerified: true } : {}),
+    })
+    .where(eq(users.id, user.id));
+
+  const token = generateJwt({ userId: user.id, username: user.username, grudgeId, isGuest: false });
+  await createDbToken(user.id, opts.tokenType);
+
+  return { user: { ...user, grudgeId }, token };
+}
+
+/**
+ * Google/Gmail OAuth — find or create user from Google OIDC profile
+ */
+export async function googleLogin(googleUser: {
+  id: string;
+  email?: string;
+  name?: string;
+  picture?: string;
+}): Promise<{ user: typeof users.$inferSelect; token: string }> {
+  return oauthFindOrCreate({
+    provider: "google",
+    providerId: googleUser.id,
+    username: `google_${googleUser.id.substring(0, 10)}`,
+    email: googleUser.email,
+    displayName: googleUser.name,
+    avatarUrl: googleUser.picture,
+    profileData: googleUser,
+    tokenType: "google",
+  });
+}
+
+/**
+ * GitHub OAuth — find or create user from GitHub profile
+ */
+export async function githubLogin(githubUser: {
+  id: number;
+  login: string;
+  email?: string | null;
+  name?: string | null;
+  avatar_url?: string;
+}): Promise<{ user: typeof users.$inferSelect; token: string }> {
+  return oauthFindOrCreate({
+    provider: "github",
+    providerId: String(githubUser.id),
+    username: `github_${githubUser.login}`,
+    email: githubUser.email,
+    displayName: githubUser.name || githubUser.login,
+    avatarUrl: githubUser.avatar_url,
+    profileData: { ...githubUser, id: String(githubUser.id) },
+    tokenType: "github",
+  });
 }

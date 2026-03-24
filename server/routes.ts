@@ -13,8 +13,11 @@ import {
   guestLogin,
   puterLogin,
   discordLogin,
+  googleLogin,
+  githubLogin,
   verifyJwt,
   generateGrudgeId,
+  buildAuthResponse,
   cleanupExpiredTokens,
   type AuthenticatedRequest,
 } from "./auth.js";
@@ -62,7 +65,19 @@ const SPAWN_LOCATIONS = {
   tutorial: { start: { x: -4, y: 0, z: -4 } },
 };
 
-// Discord OAuth config
+// OAuth configs
+const GOOGLE_CONFIG = {
+  clientId: process.env.GOOGLE_CLIENT_ID || "",
+  clientSecret: process.env.GOOGLE_CLIENT_SECRET || "",
+  redirectUri: process.env.GOOGLE_REDIRECT_URI || "https://api.grudge-studio.com/auth/google/callback",
+};
+
+const GITHUB_CONFIG = {
+  clientId: process.env.GITHUB_CLIENT_ID || "",
+  clientSecret: process.env.GITHUB_CLIENT_SECRET || "",
+  redirectUri: process.env.GITHUB_REDIRECT_URI || "https://api.grudge-studio.com/auth/github/callback",
+};
+
 const DISCORD_CONFIG = {
   clientId: process.env.DISCORD_CLIENT_ID || "",
   clientSecret: process.env.DISCORD_CLIENT_SECRET || "",
@@ -81,25 +96,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/auth/register", async (req, res) => {
     try {
       const { username, password, email } = req.body;
-      if (!username || !password) {
+      if (!username || !password)
         return res.status(400).json({ error: "Username and password required" });
-      }
       const result = await registerUser(username, password, email);
-      const grudgeId = generateGrudgeId(result.user.id);
-      res.status(201).json({
-        success: true,
-        token: result.token,
-        user: {
-          id: result.user.id,
-          username: result.user.username,
-          grudgeId,
-          isGuest: false,
-        },
-      });
+      res.status(201).json(await buildAuthResponse(result.user, result.token));
     } catch (error: any) {
-      if (error.message === "Username already exists") {
+      if (error.message === "Username already exists")
         return res.status(409).json({ error: error.message });
-      }
       console.error("Register error:", error);
       res.status(500).json({ error: "Server error" });
     }
@@ -108,25 +111,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/auth/login", async (req, res) => {
     try {
       const { username, password } = req.body;
-      if (!username || !password) {
+      if (!username || !password)
         return res.status(400).json({ error: "Username and password required" });
-      }
       const result = await loginUser(username, password);
-      const grudgeId = generateGrudgeId(result.user.id);
-      res.json({
-        success: true,
-        token: result.token,
-        user: {
-          id: result.user.id,
-          username: result.user.username,
-          grudgeId,
-          isGuest: false,
-        },
-      });
+      res.json(await buildAuthResponse(result.user, result.token));
     } catch (error: any) {
-      if (error.message === "Invalid credentials") {
+      if (error.message === "Invalid credentials")
         return res.status(401).json({ error: error.message });
-      }
       console.error("Login error:", error);
       res.status(500).json({ error: "Server error" });
     }
@@ -135,17 +126,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/auth/guest", async (_req, res) => {
     try {
       const result = await guestLogin();
-      const grudgeId = generateGrudgeId(result.user.id);
-      res.status(201).json({
-        success: true,
-        token: result.token,
-        user: {
-          id: result.user.id,
-          username: result.user.username,
-          grudgeId,
-          isGuest: true,
-        },
-      });
+      res.status(201).json(await buildAuthResponse(result.user, result.token));
     } catch (error) {
       console.error("Guest login error:", error);
       res.status(500).json({ error: "Server error" });
@@ -155,21 +136,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/auth/puter", async (req, res) => {
     try {
       const { puterId, displayName } = req.body;
-      if (!puterId) {
-        return res.status(400).json({ error: "puterId required" });
-      }
+      if (!puterId) return res.status(400).json({ error: "puterId required" });
       const result = await puterLogin(puterId, displayName);
-      const grudgeId = generateGrudgeId(result.user.id);
-      res.json({
-        success: true,
-        token: result.token,
-        user: {
-          id: result.user.id,
-          username: result.user.username,
-          grudgeId,
-          isGuest: false,
-        },
-      });
+      res.json(await buildAuthResponse(result.user, result.token, ["puter"]));
     } catch (error) {
       console.error("Puter login error:", error);
       res.status(500).json({ error: "Server error" });
@@ -235,6 +204,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/auth/user",      (req, res) => res.redirect(307, "/api/auth/user"));
   app.post("/auth/logout",   (req, res) => res.redirect(307, "/api/auth/logout"));
   app.post("/auth/wallet",   (req, res) => res.redirect(307, "/api/auth/wallet"));
+  app.get("/auth/nonce",     (req, res) => res.redirect(307, "/api/auth/nonce"));
+  // Google + GitHub use their own full callback handlers above (not redirected)
 
   // ---------- DISCORD OAUTH ----------
 
@@ -284,6 +255,113 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.redirect(`${FRONTEND_URL}/auth/callback?token=${result.token}`);
     } catch (error) {
       console.error("Discord auth error:", error);
+      res.redirect(`${FRONTEND_URL}/auth/error?msg=auth_failed`);
+    }
+  });
+
+  // ---------- GOOGLE OAUTH ----------
+
+  app.get("/auth/google", (_req, res) => {
+    if (!GOOGLE_CONFIG.clientId)
+      return res.status(503).json({ error: "Google auth not configured. Set GOOGLE_CLIENT_ID." });
+    const params = new URLSearchParams({
+      client_id: GOOGLE_CONFIG.clientId,
+      redirect_uri: GOOGLE_CONFIG.redirectUri,
+      response_type: "code",
+      scope: "openid email profile",
+      access_type: "offline",
+      prompt: "select_account",
+    });
+    res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`);
+  });
+
+  app.get("/auth/google/callback", async (req, res) => {
+    const { code } = req.query;
+    if (!code) return res.redirect(`${FRONTEND_URL}/auth/error?msg=no_code`);
+    try {
+      // Exchange code for access token
+      const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          code: String(code),
+          client_id: GOOGLE_CONFIG.clientId,
+          client_secret: GOOGLE_CONFIG.clientSecret,
+          redirect_uri: GOOGLE_CONFIG.redirectUri,
+          grant_type: "authorization_code",
+        }),
+      });
+      const tokens = (await tokenRes.json()) as { access_token?: string };
+      if (!tokens.access_token) throw new Error("No access token");
+
+      // Fetch user profile
+      const userRes = await fetch(
+        `https://www.googleapis.com/oauth2/v2/userinfo`,
+        { headers: { Authorization: `Bearer ${tokens.access_token}` } }
+      );
+      const googleUser = (await userRes.json()) as {
+        id: string; email?: string; name?: string; picture?: string;
+      };
+
+      const result = await googleLogin(googleUser);
+      res.redirect(`${FRONTEND_URL}/auth/callback?token=${result.token}&provider=google`);
+    } catch (error) {
+      console.error("Google auth error:", error);
+      res.redirect(`${FRONTEND_URL}/auth/error?msg=auth_failed`);
+    }
+  });
+
+  // ---------- GITHUB OAUTH ----------
+
+  app.get("/auth/github", (_req, res) => {
+    if (!GITHUB_CONFIG.clientId)
+      return res.status(503).json({ error: "GitHub auth not configured. Set GITHUB_CLIENT_ID." });
+    const params = new URLSearchParams({
+      client_id: GITHUB_CONFIG.clientId,
+      redirect_uri: GITHUB_CONFIG.redirectUri,
+      scope: "user:email read:user",
+    });
+    res.redirect(`https://github.com/login/oauth/authorize?${params}`);
+  });
+
+  app.get("/auth/github/callback", async (req, res) => {
+    const { code } = req.query;
+    if (!code) return res.redirect(`${FRONTEND_URL}/auth/error?msg=no_code`);
+    try {
+      const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({
+          client_id: GITHUB_CONFIG.clientId,
+          client_secret: GITHUB_CONFIG.clientSecret,
+          code: String(code),
+          redirect_uri: GITHUB_CONFIG.redirectUri,
+        }),
+      });
+      const tokens = (await tokenRes.json()) as { access_token?: string };
+      if (!tokens.access_token) throw new Error("No access token");
+
+      const userRes = await fetch("https://api.github.com/user", {
+        headers: { Authorization: `Bearer ${tokens.access_token}`, "User-Agent": "GrudgeStudio" },
+      });
+      const githubUser = (await userRes.json()) as {
+        id: number; login: string; email?: string | null; name?: string | null; avatar_url?: string;
+      };
+
+      // GitHub may hide email — fetch primary email separately
+      if (!githubUser.email) {
+        const emailRes = await fetch("https://api.github.com/user/emails", {
+          headers: { Authorization: `Bearer ${tokens.access_token}`, "User-Agent": "GrudgeStudio" },
+        });
+        const emails = (await emailRes.json()) as { email: string; primary: boolean; verified: boolean }[];
+        const primary = emails.find((e) => e.primary && e.verified);
+        if (primary) githubUser.email = primary.email;
+      }
+
+      const result = await githubLogin(githubUser);
+      res.redirect(`${FRONTEND_URL}/auth/callback?token=${result.token}&provider=github`);
+    } catch (error) {
+      console.error("GitHub auth error:", error);
       res.redirect(`${FRONTEND_URL}/auth/error?msg=auth_failed`);
     }
   });
@@ -684,9 +762,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
       timestamp: new Date().toISOString(),
       features: {
         api: true,
-        auth: true,
-        discord: !!DISCORD_CONFIG.clientId,
-        crossmint: !!process.env.CROSSMINT_API_KEY,
+        auth: {
+          password: true,
+          guest: true,
+          puter: true,
+          discord: !!DISCORD_CONFIG.clientId,
+          google: !!GOOGLE_CONFIG.clientId,
+          github: !!GITHUB_CONFIG.clientId,
+          wallet: true,       // Phantom / Solflare / Backpack (Ed25519)
+          web3auth: true,     // Social → Solana via Web3Auth (frontend)
+          crossmint: !!process.env.CROSSMINT_API_KEY, // Custodial server-side wallet
+        },
         websocket: true,
         ai: !!process.env.GEMINI_API_KEY,
         walletAuth: true,
