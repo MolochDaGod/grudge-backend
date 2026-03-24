@@ -230,6 +230,78 @@ async function handleOpenAIComplete(
 }
 
 // ============================================
+// OBJECTSTORE v1 API — compatible with GDevelopAssistant objectstore.ts
+// GET /v1/assets            — list R2 objects as R2Asset schema
+// GET /v1/assets/:id        — single asset metadata
+// GET /v1/assets/:id/file   — redirect to CDN
+// GET /health               — used by useObjectStoreHealth()
+// ============================================
+
+function keyToCategory(key: string): string {
+  const parts = key.split("/");
+  if (parts.length >= 2) return parts[1]; // players/<category>/...
+  const ext = key.split(".").pop()?.toLowerCase() || "";
+  if (["mp3","ogg","wav"].includes(ext)) return "sound";
+  if (["glb","gltf","vox"].includes(ext)) return "unit";
+  if (["png","jpg","webp"].includes(ext)) return "sprite";
+  return "general";
+}
+
+function objToR2Asset(obj: { key: string; size: number; etag: string }, publicBase: string) {
+  const filename = obj.key.split("/").pop() || obj.key;
+  const ext = filename.split(".").pop()?.toLowerCase() || "";
+  const mimeMap: Record<string,string> = {
+    png:"image/png",jpg:"image/jpeg",webp:"image/webp",gif:"image/gif",
+    mp3:"audio/mpeg",ogg:"audio/ogg",wav:"audio/wav",
+    glb:"model/gltf-binary",gltf:"model/gltf+json",vox:"application/octet-stream",
+  };
+  return {
+    id: encodeURIComponent(obj.key),
+    key: obj.key,
+    filename,
+    mime: mimeMap[ext] || "application/octet-stream",
+    size: obj.size,
+    sha256: obj.etag || null,
+    category: keyToCategory(obj.key),
+    tags: [],
+    visibility: "public",
+    metadata: {},
+    file_url: `${publicBase}/${obj.key}`,
+    created_at: new Date().toISOString(),
+  };
+}
+
+async function handleObjectStoreList(request: Request, env: Env): Promise<Response> {
+  if (!env.ASSETS) return Response.json({ status: "error", message: "R2 not bound" }, { status: 503 });
+  const url = new URL(request.url);
+  const prefix   = url.searchParams.get("prefix") || "";
+  const category = url.searchParams.get("category") || "";
+  const limit    = Math.min(parseInt(url.searchParams.get("limit") || "100"), 1000);
+  const offset   = parseInt(url.searchParams.get("offset") || "0");
+
+  const result = await env.ASSETS.list({ prefix: prefix || category ? `players/` : "", limit: limit + offset });
+  let objects = result.objects;
+  if (category) objects = objects.filter(o => keyToCategory(o.key) === category);
+
+  const page = objects.slice(offset, offset + limit);
+  return Response.json({
+    items: page.map(o => objToR2Asset(o, ASSETS_PUBLIC)),
+    count: page.length,
+    total: objects.length,
+    limit,
+    offset,
+  });
+}
+
+async function handleObjectStoreGet(key: string, env: Env): Promise<Response> {
+  if (!env.ASSETS) return Response.json({ error: "R2 not bound" }, { status: 503 });
+  const decoded = decodeURIComponent(key);
+  const obj = await env.ASSETS.get(decoded);
+  if (!obj) return Response.json({ error: "Not found" }, { status: 404 });
+  return Response.json(objToR2Asset({ key: decoded, size: 0, etag: "" }, ASSETS_PUBLIC));
+}
+
+// ============================================
 // R2 ASSET HANDLERS
 // ============================================
 
@@ -474,21 +546,14 @@ export default {
       );
     }
 
-    // Health relay
+    // Health relay (also used as objectstore health check)
     if (path === "/health") {
-      try {
-        const backend = await proxyToBackend(request, env, "/api/health");
-        const data = await backend.json();
-        return Response.json(
-          { edge: "healthy", backend: data },
-          { headers: cors }
-        );
-      } catch {
-        return Response.json(
-          { edge: "healthy", backend: "unreachable" },
-          { status: 200, headers: cors }
-        );
-      }
+      let backendData: unknown = "unreachable";
+      try { const b = await proxyToBackend(request, env, "/api/health"); backendData = await b.json(); } catch {}
+      return Response.json(
+        { status: "ok", service: "grudge-objectstore", edge: "healthy", r2: !!env.ASSETS, backend: backendData },
+        { headers: cors }
+      );
     }
 
     // AI Chat (Anthropic)
@@ -529,6 +594,22 @@ export default {
         status: res.status,
         headers: { ...Object.fromEntries(res.headers), ...cors },
       });
+    }
+
+    // ObjectStore v1 API (used by GDevelopAssistant asset gallery)
+    if (path === "/v1/assets" && request.method === "GET") {
+      const res = await handleObjectStoreList(request, env);
+      return new Response(res.body, { status: res.status, headers: { ...Object.fromEntries(res.headers), ...cors } });
+    }
+    if (path.startsWith("/v1/assets/") && request.method === "GET") {
+      const encoded = path.replace("/v1/assets/", "");
+      if (encoded.endsWith("/file")) {
+        // Redirect to CDN
+        const key = decodeURIComponent(encoded.replace("/file", ""));
+        return Response.redirect(`${ASSETS_PUBLIC}/${key}`, 302);
+      }
+      const res = await handleObjectStoreGet(encoded, env);
+      return new Response(res.body, { status: res.status, headers: { ...Object.fromEntries(res.headers), ...cors } });
     }
 
     // Assets — R2 upload (PUT/POST) and list (GET)
