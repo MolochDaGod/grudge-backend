@@ -25,6 +25,11 @@ import walletRouter from "./routes/wallet.js";
 import walletAuthRouter from "./routes/wallet-auth.js";
 import studioSyncRouter from "./routes/studio-sync.js";
 import assetsRouter from "./routes/assets.js";
+import economyRouter from "./routes/economy.js";
+import missionsRouter from "./routes/missions.js";
+import combatRouter from "./routes/combat.js";
+import crewsRouter from "./routes/crews.js";
+import craftingRouter from "./routes/crafting.js";
 
 // ============================================
 // GAME CONSTANTS
@@ -467,12 +472,90 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   );
 
+  // ---------- CHARACTER UPDATE ----------
+
+  app.patch(
+    "/api/characters/:id",
+    authMiddleware,
+    async (req: AuthenticatedRequest, res) => {
+      try {
+        const [char] = await db
+          .select()
+          .from(characters)
+          .where(eq(characters.id, req.params.id))
+          .limit(1);
+
+        if (!char) return res.status(404).json({ error: "Character not found" });
+        if (char.userId !== req.user!.userId) return res.status(403).json({ error: "Not your character" });
+
+        const updates: Record<string, any> = {};
+
+        // Attribute allocation (spend attribute points)
+        if (req.body.attributes && req.body.allocatePoints) {
+          const newAttrs = req.body.attributes;
+          const currentAttrs = (char.attributes as any) || {};
+          let pointsSpent = 0;
+          for (const [key, val] of Object.entries(newAttrs)) {
+            const diff = (val as number) - (currentAttrs[key] || 0);
+            if (diff > 0) pointsSpent += diff;
+          }
+          if (pointsSpent > (char.attributePoints || 0)) {
+            return res.status(400).json({ error: `Not enough attribute points. Have ${char.attributePoints}, need ${pointsSpent}` });
+          }
+          updates.attributes = { ...currentAttrs, ...newAttrs };
+          updates.attributePoints = (char.attributePoints || 0) - pointsSpent;
+        } else if (req.body.attributes) {
+          updates.attributes = req.body.attributes;
+        }
+
+        // Equipment changes
+        if (req.body.equipment) {
+          const currentEquip = (char.equipment as any) || {};
+          updates.equipment = { ...currentEquip, ...req.body.equipment };
+        }
+
+        // Name change
+        if (req.body.name) updates.name = req.body.name;
+
+        // Profession
+        if (req.body.profession) updates.profession = req.body.profession;
+
+        // Level / XP (admin or internal)
+        if (req.body.level !== undefined) updates.level = req.body.level;
+        if (req.body.experience !== undefined) updates.experience = req.body.experience;
+        if (req.body.attributePoints !== undefined) updates.attributePoints = req.body.attributePoints;
+
+        // Avatar
+        if (req.body.avatarUrl) updates.avatarUrl = req.body.avatarUrl;
+
+        // Health/Mana/Stamina
+        if (req.body.currentHealth !== undefined) updates.currentHealth = req.body.currentHealth;
+        if (req.body.currentMana !== undefined) updates.currentMana = req.body.currentMana;
+        if (req.body.currentStamina !== undefined) updates.currentStamina = req.body.currentStamina;
+
+        if (Object.keys(updates).length === 0) {
+          return res.status(400).json({ error: "No valid fields to update" });
+        }
+
+        const [updated] = await db
+          .update(characters)
+          .set(updates)
+          .where(eq(characters.id, req.params.id))
+          .returning();
+
+        res.json({ success: true, character: updated });
+      } catch (error) {
+        console.error("Update character error:", error);
+        res.status(500).json({ error: "Server error" });
+      }
+    }
+  );
+
   app.delete(
     "/api/characters/:id",
     authMiddleware,
     async (req: AuthenticatedRequest, res) => {
       try {
-        // Fetch first to enforce ownership
         const [char] = await db
           .select()
           .from(characters)
@@ -691,6 +774,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/auth/nonce", (req, res, next) => walletAuthRouter(req, res, next));
   app.post("/api/auth/wallet", (req, res, next) => walletAuthRouter(req, res, next));
   app.use("/api/wallet", walletAuthRouter); // /api/wallet/link, /api/wallet/all
+
+  // ---------- GAME SYSTEMS ----------
+
+  app.use("/api/economy", economyRouter);
+  app.use("/api/crafting", craftingRouter);
+  app.use("/api/missions", missionsRouter);
+  app.use("/api/combat", combatRouter);
+  app.use("/api/crews", crewsRouter);
 
   // ---------- STUDIO SYNC ----------
 

@@ -702,6 +702,136 @@ export const battleArenaStatsRelations = relations(
 );
 
 // ============================================
+// GOLD TRANSACTIONS TABLE
+// ============================================
+
+export const goldTransactions = pgTable("gold_transactions", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+  characterId: varchar("character_id", { length: 36 })
+    .notNull()
+    .references(() => characters.id),
+  amount: integer("amount").notNull(), // positive = credit, negative = debit
+  balanceAfter: integer("balance_after").notNull(),
+  txType: varchar("tx_type", { length: 30 }).notNull(), // purchase, craft_cost, transfer_in, transfer_out, mission_reward, loot, admin
+  refId: varchar("ref_id", { length: 100 }), // reference to related entity
+  note: text("note"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const goldTransactionsRelations = relations(goldTransactions, ({ one }) => ({
+  user: one(users, { fields: [goldTransactions.userId], references: [users.id] }),
+  character: one(characters, { fields: [goldTransactions.characterId], references: [characters.id] }),
+}));
+
+// ============================================
+// MISSIONS TABLE
+// ============================================
+
+export const missions = pgTable("missions", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+  characterId: varchar("character_id", { length: 36 })
+    .references(() => characters.id),
+  title: varchar("title", { length: 200 }).notNull(),
+  description: text("description"),
+  missionType: varchar("mission_type", { length: 30 }).notNull(), // harvest, fight, sail, compete, explore
+  objectives: jsonb("objectives"), // [{type, target, current, required}]
+  rewards: jsonb("rewards"), // {gold, xp, items[]}
+  status: varchar("status", { length: 20 }).notNull().default("active"), // active, completed, abandoned, expired
+  difficulty: integer("difficulty").default(1), // 1-10
+  expiresAt: timestamp("expires_at"),
+  completedAt: timestamp("completed_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const missionsRelations = relations(missions, ({ one }) => ({
+  user: one(users, { fields: [missions.userId], references: [users.id] }),
+  character: one(characters, { fields: [missions.characterId], references: [characters.id] }),
+}));
+
+// ============================================
+// CREWS TABLE
+// ============================================
+
+export const crews = pgTable("crews", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  name: varchar("name", { length: 100 }).notNull().unique(),
+  leaderId: varchar("leader_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+  faction: varchar("faction", { length: 20 }), // order, chaos, neutral
+  baseIslandId: varchar("base_island_id", { length: 36 })
+    .references(() => islands.id),
+  maxMembers: integer("max_members").default(5),
+  isRecruiting: boolean("is_recruiting").default(true),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at")
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+});
+
+export const crewMembers = pgTable("crew_members", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  crewId: varchar("crew_id", { length: 36 })
+    .notNull()
+    .references(() => crews.id, { onDelete: "cascade" }),
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id),
+  role: varchar("role", { length: 20 }).notNull().default("member"), // leader, officer, member
+  joinedAt: timestamp("joined_at").defaultNow(),
+});
+
+export const crewsRelations = relations(crews, ({ one, many }) => ({
+  leader: one(users, { fields: [crews.leaderId], references: [users.id] }),
+  baseIsland: one(islands, { fields: [crews.baseIslandId], references: [islands.id] }),
+  members: many(crewMembers),
+}));
+
+export const crewMembersRelations = relations(crewMembers, ({ one }) => ({
+  crew: one(crews, { fields: [crewMembers.crewId], references: [crews.id] }),
+  user: one(users, { fields: [crewMembers.userId], references: [users.id] }),
+}));
+
+// ============================================
+// COMBAT LOG TABLE
+// ============================================
+
+export const combatLog = pgTable("combat_log", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  attackerId: varchar("attacker_id", { length: 36 })
+    .references(() => characters.id),
+  defenderId: varchar("defender_id", { length: 36 })
+    .references(() => characters.id),
+  outcome: varchar("outcome", { length: 20 }).notNull(), // kill, death, flee, draw
+  combatType: varchar("combat_type", { length: 20 }).notNull(), // pve, pvp, duel, arena
+  combatData: jsonb("combat_data"), // {damage, abilities_used, duration_ms, etc}
+  islandId: varchar("island_id", { length: 36 }).references(() => islands.id),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const combatLogRelations = relations(combatLog, ({ one }) => ({
+  attacker: one(characters, { fields: [combatLog.attackerId], references: [characters.id] }),
+  defender: one(characters, { fields: [combatLog.defenderId], references: [characters.id] }),
+  island: one(islands, { fields: [combatLog.islandId], references: [islands.id] }),
+}));
+
+// ============================================
 // INSERT SCHEMAS (Zod validation)
 // ============================================
 
