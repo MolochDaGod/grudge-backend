@@ -3,6 +3,7 @@ name: Deploy Grudge Backend
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
@@ -89,11 +90,13 @@ jobs:
               -e NODE_ENV=production \
               -e JWT_SECRET="${{ secrets.JWT_SECRET }}" \
               -e CROSSMINT_API_KEY="${{ secrets.CROSSMINT_API_KEY }}" \
+              -e CROSSMINT_COLLECTION_CHARACTERS="${{ secrets.CROSSMINT_COLLECTION_CHARACTERS }}" \
+              -e CROSSMINT_COLLECTION_ISLANDS="${{ secrets.CROSSMINT_COLLECTION_ISLANDS }}" \
               -e DISCORD_CLIENT_ID="${{ secrets.DISCORD_CLIENT_ID }}" \
               -e DISCORD_CLIENT_SECRET="${{ secrets.DISCORD_CLIENT_SECRET }}" \
               -e DISCORD_REDIRECT_URI="https://api.grudge-studio.com/auth/discord/callback" \
               -e GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" \
-              -e CORS_ORIGINS="https://grudgewarlords.com,https://grudge-studio.com" \
+              -e CORS_ORIGINS="https://grudgewarlords.com,https://www.grudgewarlords.com,https://grudge-studio.com,https://grudgestudio.com,https://grudge-platform.vercel.app,https://warlord-crafting-suite.vercel.app,https://dash.grudge-studio.com,https://gruda-wars.vercel.app,https://molochdagod.github.io,http://localhost:5173" \
               -e FRONTEND_URL="https://grudgewarlords.com" \
               ghcr.io/${{ env.IMAGE_NAME }}:latest
 
