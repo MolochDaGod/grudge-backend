@@ -1,0 +1,42 @@
+# Dependencies
+node_modules
+
+# Build output
+dist
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Version control
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Docker
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# Deploy docs & scripts (not needed in image)
+deploy/
+scripts/
+.github/
+README.md
+deploy-linux.sh
+
+# Workers (separate deployment)
+workers/
+
+# Drizzle generated migrations (we use push)
+drizzle/
+
+# OS
+Thumbs.db
+.DS_Store

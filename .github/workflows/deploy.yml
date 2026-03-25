@@ -8,6 +8,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/grudge-backend
+  DEPLOY_DIR: /opt/grudge-backend
 
 jobs:
   build-and-push:
@@ -49,59 +50,70 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Deploy to GRUDA VPS
+      - name: Deploy to GRUDA VPS via docker-compose
         uses: appleboy/ssh-action@v1
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+          CROSSMINT_API_KEY: ${{ secrets.CROSSMINT_API_KEY }}
+          CROSSMINT_COLLECTION_CHARACTERS: ${{ secrets.CROSSMINT_COLLECTION_CHARACTERS }}
+          CROSSMINT_COLLECTION_ISLANDS: ${{ secrets.CROSSMINT_COLLECTION_ISLANDS }}
+          DISCORD_CLIENT_ID: ${{ secrets.DISCORD_CLIENT_ID }}
+          DISCORD_CLIENT_SECRET: ${{ secrets.DISCORD_CLIENT_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          envs: DB_PASSWORD,JWT_SECRET,CLOUDFLARE_TUNNEL_TOKEN,CROSSMINT_API_KEY,CROSSMINT_COLLECTION_CHARACTERS,CROSSMINT_COLLECTION_ISLANDS,DISCORD_CLIENT_ID,DISCORD_CLIENT_SECRET,GEMINI_API_KEY
           script: |
-            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            docker pull ghcr.io/${{ env.IMAGE_NAME }}:latest
+            set -e
+            DEPLOY_DIR=/opt/grudge-backend
 
-            # Ensure PostgreSQL is running
-            if ! docker ps --format '{{.Names}}' | grep -q '^grudge-postgres$'; then
-              docker volume create grudge-db-data 2>/dev/null || true
-              docker run -d \
-                --name grudge-postgres \
-                --restart unless-stopped \
-                --network grudge-net \
-                -e POSTGRES_DB=grudge_game \
-                -e POSTGRES_USER=grudge \
-                -e POSTGRES_PASSWORD="${{ secrets.DB_PASSWORD }}" \
-                -v grudge-db-data:/var/lib/postgresql/data \
-                postgres:16-alpine
-              sleep 8
+            # Pull latest code
+            if [ ! -d "$DEPLOY_DIR/.git" ]; then
+              git clone https://github.com/MolochDaGod/grudge-backend.git "$DEPLOY_DIR"
             fi
+            cd "$DEPLOY_DIR"
+            git fetch origin main
+            git reset --hard origin/main
 
-            # Deploy API container
-            docker stop grudge-backend 2>/dev/null || true
-            docker rm grudge-backend 2>/dev/null || true
+            # Write production .env from GitHub Secrets
+            cat > .env << EOF
+            DB_PASSWORD=${DB_PASSWORD}
+            JWT_SECRET=${JWT_SECRET}
+            CLOUDFLARE_TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+            CROSSMINT_API_KEY=${CROSSMINT_API_KEY}
+            CROSSMINT_COLLECTION_CHARACTERS=${CROSSMINT_COLLECTION_CHARACTERS:-grudge-characters}
+            CROSSMINT_COLLECTION_ISLANDS=${CROSSMINT_COLLECTION_ISLANDS:-grudge-islands}
+            DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID}
+            DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET}
+            DISCORD_REDIRECT_URI=https://api.grudge-studio.com/auth/discord/callback
+            GEMINI_API_KEY=${GEMINI_API_KEY}
+            CORS_ORIGINS=https://grudgewarlords.com,https://www.grudgewarlords.com,https://grudge-studio.com,https://grudgestudio.com,https://dash.grudge-studio.com,https://grudge-platform.vercel.app,https://warlord-crafting-suite.vercel.app,https://gdevelop-assistant.vercel.app,https://grudachain-rho.vercel.app,https://gruda-wars.vercel.app,https://molochdagod.github.io,http://localhost:5173
+            FRONTEND_URL=https://grudgewarlords.com
+            EOF
+            # Remove leading whitespace from heredoc
+            sed -i 's/^[[:space:]]*//' .env
 
-            docker network create grudge-net 2>/dev/null || true
+            # Build and deploy all services (postgres + api + cloudflared)
+            docker compose build --no-cache api
+            docker compose up -d
 
-            docker run -d \
-              --name grudge-backend \
-              --restart unless-stopped \
-              --network grudge-net \
-              -e DATABASE_URL="postgresql://grudge:${{ secrets.DB_PASSWORD }}@grudge-postgres:5432/grudge_game" \
-              -e PORT=5000 \
-              -e NODE_ENV=production \
-              -e JWT_SECRET="${{ secrets.JWT_SECRET }}" \
-              -e CROSSMINT_API_KEY="${{ secrets.CROSSMINT_API_KEY }}" \
-              -e CROSSMINT_COLLECTION_CHARACTERS="${{ secrets.CROSSMINT_COLLECTION_CHARACTERS }}" \
-              -e CROSSMINT_COLLECTION_ISLANDS="${{ secrets.CROSSMINT_COLLECTION_ISLANDS }}" \
-              -e DISCORD_CLIENT_ID="${{ secrets.DISCORD_CLIENT_ID }}" \
-              -e DISCORD_CLIENT_SECRET="${{ secrets.DISCORD_CLIENT_SECRET }}" \
-              -e DISCORD_REDIRECT_URI="https://api.grudge-studio.com/auth/discord/callback" \
-              -e GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" \
-              -e CORS_ORIGINS="https://grudgewarlords.com,https://www.grudgewarlords.com,https://grudge-studio.com,https://grudgestudio.com,https://dash.grudge-studio.com,https://grudge-platform.vercel.app,https://warlord-crafting-suite.vercel.app,https://gdevelop-assistant.vercel.app,https://grudachain-rho.vercel.app,https://gruda-wars.vercel.app,https://molochdagod.github.io,http://localhost:5173" \
-              -e FRONTEND_URL="https://grudgewarlords.com" \
-              ghcr.io/${{ env.IMAGE_NAME }}:latest
-
-            # Wait for API to become healthy before reporting success
+            # Wait for API to become healthy
             echo "Waiting for API health check..."
-            sleep 10
-            docker exec grudge-backend wget -qO- http://localhost:5000/api/health || echo "⚠️  Health check failed — check logs"
+            sleep 15
+            for i in 1 2 3 4 5; do
+              if docker compose exec -T api wget -qO- http://localhost:5000/api/health; then
+                echo ""
+                echo "✅ Grudge Backend deployed successfully"
+                exit 0
+              fi
+              echo "  Attempt $i/5 — retrying in 5s..."
+              sleep 5
+            done
 
-            echo "✅ Grudge Backend deployed"
+            echo "⚠️  Health check did not pass — check logs with: docker compose logs api"
+            docker compose logs --tail=30 api
+            exit 1
