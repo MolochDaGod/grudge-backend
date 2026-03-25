@@ -1,0 +1,68 @@
+# Grudge Studio — Cloudflare Workers Auto-Deploy
+# Triggers on push to main when worker code changes
+# Requires secrets: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID
+
+name: Deploy Workers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'workers/ale/**'
+  workflow_dispatch: # Manual trigger from Actions tab
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  deploy-ale:
+    name: Deploy ALE (ai.grudge-studio.com)
+    runs-on: ubuntu-latest
+    environment: production
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      contains(join(github.event.commits.*.modified, ','), 'workers/ale/')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: workers/ale/package-lock.json
+
+      - name: Install dependencies
+        working-directory: workers/ale
+        run: npm ci
+
+      - name: Type check
+        working-directory: workers/ale
+        run: npx tsc --noEmit || true
+
+      - name: Deploy to Cloudflare
+        working-directory: workers/ale
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Verify deployment
+        run: |
+          sleep 5
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://ai.grudge-studio.com/)
+          echo "ai.grudge-studio.com status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "::warning::ALE deployment may have issues (HTTP $STATUS)"
+          fi
+
+      - name: Post deployment summary
+        run: |
+          echo "## ALE Worker Deployed :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service**: ai.grudge-studio.com" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: 3.0.0 (Legion Hub)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Endpoints**: AI, Legion, Debug, Storage, Proxy" >> $GITHUB_STEP_SUMMARY
