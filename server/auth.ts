@@ -8,6 +8,9 @@ import { users, authTokens, authProviders } from "../shared/schema.js";
 
 // ============================================
 // CONFIG
+// IMPORTANT: JWT_SECRET must match the grudge-id service on the VPS
+// so tokens issued by id.grudge-studio.com are valid here too.
+// Set JWT_SECRET in .env to the same value as the VPS docker-compose.
 // ============================================
 
 const JWT_SECRET = process.env.JWT_SECRET || "grudge-studio-jwt-secret-change-me";
@@ -39,7 +42,15 @@ export function generateJwt(payload: JwtPayload): string {
 
 export function verifyJwt(token: string): JwtPayload | null {
   try {
-    return jwt.verify(token, JWT_SECRET) as JwtPayload;
+    // Accept tokens from both this backend and grudge-id service
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    // Map grudge-id token format (sub, grudgeId, name) to our JwtPayload
+    return {
+      userId: decoded.userId || decoded.sub?.toString() || decoded.id,
+      username: decoded.username || decoded.name || 'Player',
+      grudgeId: decoded.grudgeId || decoded.grudge_id || '',
+      isGuest: decoded.isGuest ?? false,
+    };
   } catch {
     return null;
   }
