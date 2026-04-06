@@ -9,6 +9,8 @@ import {
   timestamp,
   bigint,
   serial,
+  smallint,
+  decimal,
   index,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
@@ -219,7 +221,18 @@ export const characters = pgTable("characters", {
   currentStamina: integer("current_stamina"),
   avatarUrl: text("avatar_url"),
 
-  // cNFT Integration
+  // Cross-game identity
+  factionId: varchar("faction_id", { length: 20 }), // crusade, fabled, legion — derived from race
+  prefabId: varchar("prefab_id", { length: 100 }),   // e.g. human_warrior — for model resolution
+  modelVariant: varchar("model_variant", { length: 50 }), // cosmetic variant override
+
+  // Weapon skill proficiencies (leveled per weapon type)
+  weaponSkills: jsonb("weapon_skills").$type<Record<string, number>>(), // e.g. { sword: 12, bow: 5 }
+
+  // Game origin — which game/app created this character
+  gameOrigin: varchar("game_origin", { length: 50 }), // grudge-wars, wcs, dcq, moba, babylon, island
+
+  // cNFT Integration (inline quick-reference)
   cnftMintId: varchar("cnft_mint_id", { length: 100 }),
   cnftMetadataUri: text("cnft_metadata_uri"),
   cnftStatus: varchar("cnft_status", { length: 20 }), // pending, minted, failed
@@ -832,6 +845,785 @@ export const combatLogRelations = relations(combatLog, ({ one }) => ({
 }));
 
 // ============================================
+// P0 — GOULDSTONES (AI Companion Clones)
+// ============================================
+
+export const gouldstones = pgTable("gouldstones", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  ownerUserId: varchar("owner_user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  name: varchar("name", { length: 64 }).notNull(),
+  raceId: varchar("race_id", { length: 32 }).notNull(),
+  classId: varchar("class_id", { length: 32 }).notNull(),
+  level: integer("level").default(1),
+  stats: jsonb("stats").notNull(), // {hp, max_hp, strength, dexterity, intelligence, ...}
+  gear: jsonb("gear").notNull(),   // [{item_key, slot, tier, item_type}, ...]
+  professionLevels: jsonb("profession_levels").notNull(), // {mining, fishing, woodcutting, farming, hunting}
+  behaviorProfile: varchar("behavior_profile", { length: 64 }).default("balanced"),
+  faction: varchar("faction", { length: 32 }),
+  source: varchar("source", { length: 20 }).default("vendor"), // vendor, boss_drop, crafted
+  isActive: boolean("is_active").default(true),
+  deployedIslandId: varchar("deployed_island_id", { length: 36 }).references(() => islands.id),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  ownerActiveIdx: index("gouldstones_owner_active_idx").on(table.ownerUserId, table.isActive),
+}));
+
+export const gouldstonesRelations = relations(gouldstones, ({ one }) => ({
+  owner: one(users, { fields: [gouldstones.ownerUserId], references: [users.id] }),
+  deployedIsland: one(islands, { fields: [gouldstones.deployedIslandId], references: [islands.id] }),
+}));
+
+// ============================================
+// P0 — PROFESSION PROGRESS
+// ============================================
+
+export const professionProgress = pgTable("profession_progress", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  characterId: varchar("character_id", { length: 36 })
+    .notNull()
+    .references(() => characters.id, { onDelete: "cascade" }),
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  profession: varchar("profession", { length: 30 }).notNull(), // mining, fishing, woodcutting, farming, hunting
+  xp: integer("xp").default(0),
+  level: smallint("level").default(0), // 0-100
+  milestone: smallint("milestone").default(0), // 0, 25, 50, 75, 100
+  unlockedTier: smallint("unlocked_tier").default(1), // 1-5
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at")
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+}, (table) => ({
+  charProfUnique: uniqueIndex("profession_progress_char_prof_uq").on(table.characterId, table.profession),
+  charIdx: index("profession_progress_char_idx").on(table.characterId),
+}));
+
+export const professionProgressRelations = relations(professionProgress, ({ one }) => ({
+  character: one(characters, { fields: [professionProgress.characterId], references: [characters.id] }),
+  user: one(users, { fields: [professionProgress.userId], references: [users.id] }),
+}));
+
+// ============================================
+// P0 — CRAFTING RECIPES
+// ============================================
+
+export const craftingRecipes = pgTable("crafting_recipes", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  recipeKey: varchar("recipe_key", { length: 128 }).notNull().unique(),
+  name: varchar("name", { length: 128 }).notNull(),
+  outputItemKey: varchar("output_item_key", { length: 128 }).notNull(),
+  outputItemType: varchar("output_item_type", { length: 30 }).notNull(), // weapon, armor, shield, off_hand, relic, cape, tome, wand
+  outputTier: smallint("output_tier").notNull().default(1), // 1-6
+  requiredProfession: varchar("required_profession", { length: 30 }).default("none"),
+  requiredLevel: smallint("required_level").default(0),
+  costGold: integer("cost_gold").default(0),
+  costMaterials: jsonb("cost_materials"), // [{item_key, quantity}, ...]
+  craftTimeSeconds: integer("craft_time_seconds").default(0),
+  classRestriction: varchar("class_restriction", { length: 32 }),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  typeTierIdx: index("crafting_recipes_type_tier_idx").on(table.outputItemType, table.outputTier),
+}));
+
+// ============================================
+// P0 — ISLAND STATE (World Islands)
+// ============================================
+
+export const islandState = pgTable("island_state", {
+  islandKey: varchar("island_key", { length: 64 }).primaryKey(),
+  displayName: varchar("display_name", { length: 128 }),
+  controllingCrewId: varchar("controlling_crew_id", { length: 36 })
+    .references(() => crews.id, { onDelete: "set null" }),
+  claimFlagPlantedAt: timestamp("claim_flag_planted_at"),
+  activePlayers: jsonb("active_players").default([]),
+  resources: jsonb("resources").default({}),
+  lastUpdated: timestamp("last_updated")
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+}, (table) => ({
+  crewIdx: index("island_state_crew_idx").on(table.controllingCrewId),
+}));
+
+export const islandStateRelations = relations(islandState, ({ one }) => ({
+  controllingCrew: one(crews, { fields: [islandState.controllingCrewId], references: [crews.id] }),
+}));
+
+// ============================================
+// P1 — USER PROFILES
+// ============================================
+
+export const userProfiles = pgTable("user_profiles", {
+  userId: varchar("user_id", { length: 36 })
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  avatarUrl: varchar("avatar_url", { length: 512 }),
+  bio: text("bio"),
+  socialLinks: jsonb("social_links"), // {twitter, discord_tag, twitch, youtube}
+  country: varchar("country", { length: 4 }), // ISO 3166-1 alpha-2
+  updatedAt: timestamp("updated_at")
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+});
+
+export const userProfilesRelations = relations(userProfiles, ({ one }) => ({
+  user: one(users, { fields: [userProfiles.userId], references: [users.id] }),
+}));
+
+// ============================================
+// P1 — FRIENDSHIPS
+// ============================================
+
+export const friendships = pgTable("friendships", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  requesterUserId: varchar("requester_user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  addresseeUserId: varchar("addressee_user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  status: varchar("status", { length: 10 }).notNull().default("pending"), // pending, accepted, blocked
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at")
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+}, (table) => ({
+  pairUnique: uniqueIndex("friendships_pair_uq").on(table.requesterUserId, table.addresseeUserId),
+  addresseeIdx: index("friendships_addressee_idx").on(table.addresseeUserId, table.status),
+}));
+
+// ============================================
+// P1 — NOTIFICATIONS
+// ============================================
+
+export const notifications = pgTable("notifications", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  type: varchar("type", { length: 64 }).notNull(), // friend_request, achievement, crew_invite, etc.
+  payload: jsonb("payload"),
+  isRead: boolean("is_read").default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  userUnreadIdx: index("notifications_user_unread_idx").on(table.userId, table.isRead, table.createdAt),
+}));
+
+export const notificationsRelations = relations(notifications, ({ one }) => ({
+  user: one(users, { fields: [notifications.userId], references: [users.id] }),
+}));
+
+// ============================================
+// P1 — ACHIEVEMENTS
+// ============================================
+
+export const achievementsDef = pgTable("achievements_def", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  achKey: varchar("ach_key", { length: 128 }).notNull().unique(),
+  name: varchar("name", { length: 128 }).notNull(),
+  description: text("description"),
+  iconUrl: varchar("icon_url", { length: 512 }),
+  points: smallint("points").default(10),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const userAchievements = pgTable("user_achievements", {
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  achievementKey: varchar("achievement_key", { length: 128 })
+    .notNull()
+    .references(() => achievementsDef.achKey, { onDelete: "cascade" }),
+  earnedAt: timestamp("earned_at").defaultNow(),
+}, (table) => ({
+  pk: uniqueIndex("user_achievements_pk").on(table.userId, table.achievementKey),
+}));
+
+// ============================================
+// P1 — CLOUD SAVES
+// ============================================
+
+export const cloudSaves = pgTable("cloud_saves", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  characterId: varchar("character_id", { length: 36 })
+    .references(() => characters.id, { onDelete: "set null" }),
+  saveKey: varchar("save_key", { length: 128 }).notNull(), // autosave, checkpoint_1, export
+  puterPath: varchar("puter_path", { length: 512 }).notNull(),
+  sizeBytes: integer("size_bytes").default(0),
+  checksum: varchar("checksum", { length: 64 }),
+  syncedAt: timestamp("synced_at")
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  charSaveUnique: uniqueIndex("cloud_saves_char_save_uq").on(table.userId, table.characterId, table.saveKey),
+  userSavesIdx: index("cloud_saves_user_idx").on(table.userId, table.syncedAt),
+}));
+
+export const cloudSavesRelations = relations(cloudSaves, ({ one }) => ({
+  user: one(users, { fields: [cloudSaves.userId], references: [users.id] }),
+  character: one(characters, { fields: [cloudSaves.characterId], references: [characters.id] }),
+}));
+
+// ============================================
+// P2 — PVP LOBBIES
+// ============================================
+
+export const pvpLobbies = pgTable("pvp_lobbies", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  lobbyCode: varchar("lobby_code", { length: 8 }).notNull().unique(),
+  mode: varchar("mode", { length: 20 }).notNull().default("duel"), // duel, crew_battle, arena_ffa
+  island: varchar("island", { length: 64 }).notNull().default("spawn"),
+  hostUserId: varchar("host_user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  status: varchar("status", { length: 20 }).notNull().default("waiting"), // waiting, ready, in_progress, finished, cancelled
+  maxPlayers: smallint("max_players").notNull().default(2),
+  settings: jsonb("settings").default({}), // {friendly_fire, time_limit_s, respawns, wager_gold}
+  createdAt: timestamp("created_at").defaultNow(),
+  startedAt: timestamp("started_at"),
+  finishedAt: timestamp("finished_at"),
+}, (table) => ({
+  statusIdx: index("pvp_lobbies_status_idx").on(table.status, table.createdAt),
+  hostIdx: index("pvp_lobbies_host_idx").on(table.hostUserId),
+}));
+
+export const pvpLobbyPlayers = pgTable("pvp_lobby_players", {
+  lobbyId: varchar("lobby_id", { length: 36 })
+    .notNull()
+    .references(() => pvpLobbies.id, { onDelete: "cascade" }),
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  characterId: varchar("character_id", { length: 36 })
+    .notNull()
+    .references(() => characters.id, { onDelete: "cascade" }),
+  team: smallint("team").notNull().default(0), // 0=FFA, 1=red, 2=blue
+  isReady: boolean("is_ready").notNull().default(false),
+  joinedAt: timestamp("joined_at").defaultNow(),
+}, (table) => ({
+  pk: uniqueIndex("pvp_lobby_players_pk").on(table.lobbyId, table.userId),
+  lobbyIdx: index("pvp_lobby_players_lobby_idx").on(table.lobbyId, table.isReady),
+}));
+
+export const pvpMatches = pgTable("pvp_matches", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  lobbyId: varchar("lobby_id", { length: 36 })
+    .notNull()
+    .references(() => pvpLobbies.id, { onDelete: "cascade" }),
+  mode: varchar("mode", { length: 20 }).notNull(),
+  island: varchar("island", { length: 64 }).notNull(),
+  winnerUserId: varchar("winner_user_id", { length: 36 }),
+  winnerTeam: smallint("winner_team"),
+  durationMs: integer("duration_ms").default(0),
+  matchData: jsonb("match_data").default({}),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  winnerIdx: index("pvp_matches_winner_idx").on(table.winnerUserId, table.createdAt),
+  modeIdx: index("pvp_matches_mode_idx").on(table.mode, table.createdAt),
+}));
+
+export const pvpRatings = pgTable("pvp_ratings", {
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  mode: varchar("mode", { length: 20 }).notNull(), // duel, crew_battle, arena_ffa
+  rating: integer("rating").notNull().default(1200),
+  wins: integer("wins").default(0),
+  losses: integer("losses").default(0),
+  draws: integer("draws").default(0),
+  streak: integer("streak").default(0),
+  peakRating: integer("peak_rating").notNull().default(1200),
+  updatedAt: timestamp("updated_at")
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+}, (table) => ({
+  pk: uniqueIndex("pvp_ratings_pk").on(table.userId, table.mode),
+  ratingIdx: index("pvp_ratings_rating_idx").on(table.mode, table.rating),
+}));
+
+// ============================================
+// P3 — MOBA HEROES
+// ============================================
+
+export const mobaHeroes = pgTable("moba_heroes", {
+  id: integer("id").primaryKey(),
+  name: varchar("name", { length: 128 }).notNull(),
+  title: varchar("title", { length: 128 }).notNull(),
+  race: varchar("race", { length: 32 }).notNull(),
+  heroClass: varchar("hero_class", { length: 32 }).notNull(),
+  faction: varchar("faction", { length: 32 }).notNull(),
+  rarity: varchar("rarity", { length: 32 }).notNull().default("Common"),
+  hp: integer("hp").notNull().default(200),
+  atk: integer("atk").notNull().default(20),
+  def: integer("def").notNull().default(10),
+  spd: integer("spd").notNull().default(60),
+  rng: decimal("rng", { precision: 4, scale: 1 }).notNull().default("1.5"),
+  mp: integer("mp").notNull().default(100),
+  quote: text("quote"),
+  isSecret: boolean("is_secret").default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  classIdx: index("moba_heroes_class_idx").on(table.heroClass),
+  factionIdx: index("moba_heroes_faction_idx").on(table.faction),
+}));
+
+// ============================================
+// P3 — MOBA ABILITIES
+// ============================================
+
+export const mobaAbilities = pgTable("moba_abilities", {
+  id: serial("id").primaryKey(),
+  abilityClass: varchar("ability_class", { length: 64 }).notNull(),
+  name: varchar("name", { length: 128 }).notNull(),
+  hotkey: varchar("hotkey", { length: 1 }).notNull(),
+  cooldown: decimal("cooldown", { precision: 5, scale: 1 }).notNull().default("0"),
+  manaCost: integer("mana_cost").notNull().default(0),
+  damage: integer("damage").notNull().default(0),
+  abilityRange: integer("ability_range").notNull().default(0),
+  radius: integer("radius").notNull().default(0),
+  duration: decimal("duration", { precision: 5, scale: 1 }).notNull().default("0"),
+  abilityType: varchar("ability_type", { length: 20 }).notNull().default("damage"),
+  castType: varchar("cast_type", { length: 20 }).notNull().default("targeted"),
+  description: text("description"),
+  maxCharges: integer("max_charges"),
+  chargeRecharge: decimal("charge_recharge", { precision: 5, scale: 1 }),
+}, (table) => ({
+  classIdx: index("moba_abilities_class_idx").on(table.abilityClass),
+}));
+
+// ============================================
+// P3 — MOBA ITEMS
+// ============================================
+
+export const mobaItems = pgTable("moba_items", {
+  id: integer("id").primaryKey(),
+  name: varchar("name", { length: 128 }).notNull(),
+  cost: integer("cost").notNull().default(0),
+  hp: integer("hp").notNull().default(0),
+  atk: integer("atk").notNull().default(0),
+  def: integer("def").notNull().default(0),
+  spd: integer("spd").notNull().default(0),
+  mp: integer("mp").notNull().default(0),
+  description: text("description"),
+  tier: smallint("tier").notNull().default(1),
+});
+
+// ============================================
+// P3 — DUNGEON RUNS
+// ============================================
+
+export const dungeonRuns = pgTable("dungeon_runs", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  heroId: integer("hero_id").notNull(),
+  heroName: varchar("hero_name", { length: 128 }).notNull(),
+  heroClass: varchar("hero_class", { length: 32 }).notNull(),
+  floorsReached: integer("floors_reached").notNull().default(1),
+  kills: integer("kills").notNull().default(0),
+  goldEarned: integer("gold_earned").notNull().default(0),
+  durationMs: integer("duration_ms").notNull().default(0),
+  outcome: varchar("outcome", { length: 20 }).notNull().default("died"), // cleared, died, abandoned
+  runData: jsonb("run_data"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  playerIdx: index("dungeon_runs_player_idx").on(table.userId, table.createdAt),
+  leaderboardIdx: index("dungeon_runs_leaderboard_idx").on(table.floorsReached, table.durationMs),
+}));
+
+export const dungeonRunsRelations = relations(dungeonRuns, ({ one }) => ({
+  user: one(users, { fields: [dungeonRuns.userId], references: [users.id] }),
+}));
+
+// ============================================
+// P3 — MOBA MATCH RESULTS
+// ============================================
+
+export const mobaMatchResults = pgTable("moba_match_results", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  heroName: varchar("hero_name", { length: 128 }).notNull(),
+  heroClass: varchar("hero_class", { length: 32 }).notNull(),
+  kills: integer("kills").notNull().default(0),
+  deaths: integer("deaths").notNull().default(0),
+  assists: integer("assists").notNull().default(0),
+  durationMs: integer("duration_ms").notNull().default(0),
+  win: boolean("win").notNull().default(false),
+  matchData: jsonb("match_data"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  playerIdx: index("moba_results_player_idx").on(table.userId, table.createdAt),
+  leaderboardIdx: index("moba_results_leaderboard_idx").on(table.win, table.kills),
+}));
+
+export const mobaMatchResultsRelations = relations(mobaMatchResults, ({ one }) => ({
+  user: one(users, { fields: [mobaMatchResults.userId], references: [users.id] }),
+}));
+
+// ============================================
+// P3 — PLAYER ISLANDS (home bases, separate from world islands)
+// ============================================
+
+export const playerIslands = pgTable("player_islands", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  name: varchar("name", { length: 128 }).notNull(),
+  zoneData: jsonb("zone_data"),
+  conquerProgress: jsonb("conquer_progress"),
+  questProgress: jsonb("quest_progress"),
+  unlockedLocations: jsonb("unlocked_locations"),
+  harvestState: jsonb("harvest_state"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at")
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+}, (table) => ({
+  userIdx: index("player_islands_user_idx").on(table.userId),
+}));
+
+export const playerIslandsRelations = relations(playerIslands, ({ one }) => ({
+  user: one(users, { fields: [playerIslands.userId], references: [users.id] }),
+}));
+
+// ============================================
+// P4 — LAUNCHER VERSIONS
+// ============================================
+
+export const launcherVersions = pgTable("launcher_versions", {
+  id: serial("id").primaryKey(),
+  version: varchar("version", { length: 32 }).notNull().unique(),
+  channel: varchar("channel", { length: 10 }).default("stable"), // stable, beta, dev
+  windowsUrl: varchar("windows_url", { length: 1024 }),
+  windowsSha256: varchar("windows_sha256", { length: 64 }),
+  macUrl: varchar("mac_url", { length: 1024 }),
+  macSha256: varchar("mac_sha256", { length: 64 }),
+  linuxUrl: varchar("linux_url", { length: 1024 }),
+  linuxSha256: varchar("linux_sha256", { length: 64 }),
+  patchNotes: text("patch_notes"),
+  minVersion: varchar("min_version", { length: 32 }),
+  isCurrent: boolean("is_current").default(false),
+  publishedAt: timestamp("published_at").defaultNow(),
+});
+
+// ============================================
+// P4 — COMPUTER REGISTRATIONS
+// ============================================
+
+export const computerRegistrations = pgTable("computer_registrations", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  computerId: varchar("computer_id", { length: 128 }).notNull().unique(),
+  fingerprintHash: varchar("fingerprint_hash", { length: 64 }),
+  platform: varchar("platform", { length: 32 }),
+  label: varchar("label", { length: 64 }),
+  launcherVersion: varchar("launcher_version", { length: 32 }),
+  firstSeen: timestamp("first_seen").defaultNow(),
+  lastSeen: timestamp("last_seen")
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+  isRevoked: boolean("is_revoked").default(false),
+}, (table) => ({
+  ownerIdx: index("computer_registrations_owner_idx").on(table.userId, table.isRevoked),
+}));
+
+export const computerRegistrationsRelations = relations(computerRegistrations, ({ one }) => ({
+  user: one(users, { fields: [computerRegistrations.userId], references: [users.id] }),
+}));
+
+// ============================================
+// P4 — LAUNCH TOKENS
+// ============================================
+
+export const launchTokens = pgTable("launch_tokens", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  token: varchar("token", { length: 256 }).notNull().unique(),
+  computerId: varchar("computer_id", { length: 128 }),
+  expiresAt: timestamp("expires_at").notNull(),
+  used: boolean("used").default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  tokenLookupIdx: index("launch_tokens_lookup_idx").on(table.token, table.used, table.expiresAt),
+}));
+
+// ============================================
+// P4 — GRUDGE DEVICES (GRUDA Node pairing)
+// ============================================
+
+export const grudgeDevices = pgTable("grudge_devices", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  code: varchar("code", { length: 6 }).notNull().unique(),
+  deviceId: varchar("device_id", { length: 128 }).notNull(),
+  deviceName: varchar("device_name", { length: 64 }).default("GRUDA Node"),
+  deviceType: varchar("device_type", { length: 32 }).default("node"), // node, mobile, desktop, web
+  userId: varchar("user_id", { length: 36 })
+    .references(() => users.id, { onDelete: "set null" }),
+  status: varchar("status", { length: 10 }).notNull().default("pending"), // pending, approved, expired, revoked
+  ip: varchar("ip", { length: 64 }),
+  pairedAt: timestamp("paired_at"),
+  lastSeen: timestamp("last_seen"),
+  expiresAt: timestamp("expires_at").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  codeIdx: index("grudge_devices_code_idx").on(table.code),
+  userIdx: index("grudge_devices_user_idx").on(table.userId),
+  statusIdx: index("grudge_devices_status_idx").on(table.status),
+}));
+
+export const grudgeDevicesRelations = relations(grudgeDevices, ({ one }) => ({
+  user: one(users, { fields: [grudgeDevices.userId], references: [users.id] }),
+}));
+
+// ============================================
+// P4 — WALLET INDEX (HD derivation counter)
+// ============================================
+
+export const walletIndex = pgTable("wallet_index", {
+  id: serial("id").primaryKey(),
+  nextIndex: integer("next_index").default(0),
+});
+
+// ============================================
+// P5 — ASSETS (R2 metadata)
+// ============================================
+
+export const assets = pgTable("assets", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  r2Key: varchar("r2_key", { length: 512 }).notNull().unique(),
+  filename: varchar("filename", { length: 256 }).notNull(),
+  mime: varchar("mime", { length: 128 }),
+  size: bigint("size", { mode: "number" }).default(0),
+  sha256: varchar("sha256", { length: 64 }),
+  category: varchar("category", { length: 20 }).notNull().default("other"),
+  tags: jsonb("tags"),
+  visibility: varchar("visibility", { length: 10 }).notNull().default("public"),
+  ownerUserId: varchar("owner_user_id", { length: 36 })
+    .references(() => users.id, { onDelete: "set null" }),
+  metadata: jsonb("metadata"),
+  isDeleted: boolean("is_deleted").default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at")
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+}, (table) => ({
+  categoryIdx: index("assets_category_idx").on(table.category, table.isDeleted),
+  ownerIdx: index("assets_owner_idx").on(table.ownerUserId, table.isDeleted),
+}));
+
+export const assetsRelations = relations(assets, ({ one }) => ({
+  owner: one(users, { fields: [assets.ownerUserId], references: [users.id] }),
+}));
+
+// ============================================
+// P5 — ASSET CONVERSIONS
+// ============================================
+
+export const assetConversions = pgTable("asset_conversions", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  sourceAssetId: varchar("source_asset_id", { length: 36 })
+    .notNull()
+    .references(() => assets.id, { onDelete: "cascade" }),
+  outputAssetId: varchar("output_asset_id", { length: 36 })
+    .references(() => assets.id, { onDelete: "set null" }),
+  inputFormat: varchar("input_format", { length: 32 }).notNull(),
+  outputFormat: varchar("output_format", { length: 32 }).notNull(),
+  status: varchar("status", { length: 15 }).notNull().default("queued"), // queued, processing, completed, failed
+  error: text("error"),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  statusIdx: index("asset_conversions_status_idx").on(table.status, table.createdAt),
+}));
+
+// ============================================
+// P5 — ASSET BUNDLES
+// ============================================
+
+export const assetBundles = pgTable("asset_bundles", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  name: varchar("name", { length: 128 }).notNull(),
+  description: text("description"),
+  ownerUserId: varchar("owner_user_id", { length: 36 })
+    .references(() => users.id, { onDelete: "set null" }),
+  r2Key: varchar("r2_key", { length: 512 }),
+  size: bigint("size", { mode: "number" }).default(0),
+  status: varchar("status", { length: 10 }).notNull().default("building"), // building, ready, failed
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const assetBundleItems = pgTable("asset_bundle_items", {
+  bundleId: varchar("bundle_id", { length: 36 })
+    .notNull()
+    .references(() => assetBundles.id, { onDelete: "cascade" }),
+  assetId: varchar("asset_id", { length: 36 })
+    .notNull()
+    .references(() => assets.id, { onDelete: "cascade" }),
+}, (table) => ({
+  pk: uniqueIndex("asset_bundle_items_pk").on(table.bundleId, table.assetId),
+}));
+
+// ============================================
+// P5 — ARENA TEAMS
+// ============================================
+
+export const arenaTeams = pgTable("arena_teams", {
+  teamId: varchar("team_id", { length: 64 }).primaryKey(),
+  ownerId: varchar("owner_id", { length: 36 }).notNull(),
+  ownerName: varchar("owner_name", { length: 128 }).notNull().default("Unknown Warlord"),
+  status: varchar("status", { length: 32 }).notNull().default("ranked"),
+  heroes: jsonb("heroes").notNull(),
+  heroCount: integer("hero_count").notNull().default(0),
+  avgLevel: integer("avg_level").notNull().default(1),
+  shareToken: varchar("share_token", { length: 64 }),
+  snapshotHash: varchar("snapshot_hash", { length: 64 }),
+  wins: integer("wins").notNull().default(0),
+  losses: integer("losses").notNull().default(0),
+  totalBattles: integer("total_battles").notNull().default(0),
+  rewards: jsonb("rewards").notNull().default({ gold: 0, resources: 0, equipment: [] }),
+  demotedAt: timestamp("demoted_at"),
+  demoteReason: text("demote_reason"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at")
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+}, (table) => ({
+  winsIdx: index("arena_teams_wins_idx").on(table.wins),
+  ownerIdx: index("arena_teams_owner_idx").on(table.ownerId),
+  statusIdx: index("arena_teams_status_idx").on(table.status),
+}));
+
+// ============================================
+// P5 — ARENA BATTLES
+// ============================================
+
+export const arenaBattles = pgTable("arena_battles", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  battleId: varchar("battle_id", { length: 64 }).notNull(),
+  teamId: varchar("team_id", { length: 64 }).notNull(),
+  challengerName: varchar("challenger_name", { length: 128 }).notNull().default("Arena Challenger"),
+  result: varchar("result", { length: 32 }).notNull(), // win, loss, draw
+  battleLog: jsonb("battle_log"),
+  createdAt: timestamp("created_at").defaultNow(),
+}, (table) => ({
+  teamIdx: index("arena_battles_team_idx").on(table.teamId),
+  createdIdx: index("arena_battles_created_idx").on(table.createdAt),
+}));
+
+// ============================================
+// CHARACTER NFTS — Detailed Solana cNFT tracking
+// Mirrors grudge-builder's characterNFTs table
+// ============================================
+
+export const characterNfts = pgTable("character_nfts", {
+  id: varchar("id", { length: 36 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+
+  characterId: varchar("character_id", { length: 36 })
+    .notNull()
+    .unique()
+    .references(() => characters.id, { onDelete: "cascade" }),
+  userId: varchar("user_id", { length: 36 })
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+
+  // NFT identifiers
+  mintAddress: text("mint_address"),           // Solana mint address once minted
+  assetId: text("asset_id"),                   // Compressed NFT asset ID (Metaplex Read API)
+  collectionAddress: text("collection_address"),// Collection the NFT belongs to
+
+  // NFT metadata
+  metadataUri: text("metadata_uri"),           // Arweave/IPFS URI for off-chain metadata
+  imageUri: text("image_uri"),                 // Permanent avatar image URL
+
+  // Status tracking
+  status: varchar("status", { length: 20 }).notNull().default("pending"),
+  // pending | minting | minted | upgrading | transferred | burned
+  isCompressed: boolean("is_compressed").notNull().default(true),
+
+  // Crossmint tracking
+  crossmintActionId: text("crossmint_action_id"),
+
+  // Ownership
+  ownerWalletAddress: text("owner_wallet_address"),
+  mintedToExternal: boolean("minted_to_external").notNull().default(false),
+
+  // Timestamps
+  mintedAt: timestamp("minted_at"),
+  upgradedAt: timestamp("upgraded_at"),
+  transferredAt: timestamp("transferred_at"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at")
+    .defaultNow()
+    .$onUpdate(() => new Date()),
+});
+
+export const characterNftsRelations = relations(characterNfts, ({ one }) => ({
+  character: one(characters, {
+    fields: [characterNfts.characterId],
+    references: [characters.id],
+  }),
+  user: one(users, {
+    fields: [characterNfts.userId],
+    references: [users.id],
+  }),
+}));
+
+// ============================================
 // INSERT SCHEMAS (Zod validation)
 // ============================================
 
@@ -840,6 +1632,10 @@ export const insertCharacterSchema = createInsertSchema(characters).omit({ id: t
 export const insertAuthTokenSchema = createInsertSchema(authTokens).omit({ id: true });
 export const insertAuthProviderSchema = createInsertSchema(authProviders).omit({ id: true, createdAt: true });
 export const insertWalletSchema = createInsertSchema(wallets).omit({ id: true, createdAt: true });
+export const insertGouldstoneSchema = createInsertSchema(gouldstones).omit({ id: true, createdAt: true });
+export const insertCraftingRecipeSchema = createInsertSchema(craftingRecipes).omit({ id: true, createdAt: true });
+export const insertMobaHeroSchema = createInsertSchema(mobaHeroes).omit({ createdAt: true });
+export const insertCharacterNftSchema = createInsertSchema(characterNfts).omit({ id: true, createdAt: true, updatedAt: true });
 
 // ============================================
 // TYPES
@@ -858,3 +1654,31 @@ export type BattleArenaStat = typeof battleArenaStats.$inferSelect;
 export type Wallet = typeof wallets.$inferSelect;
 export type InsertWallet = z.infer<typeof insertWalletSchema>;
 export type WalletNonce = typeof walletNonces.$inferSelect;
+export type Gouldstone = typeof gouldstones.$inferSelect;
+export type InsertGouldstone = z.infer<typeof insertGouldstoneSchema>;
+export type ProfessionProgress = typeof professionProgress.$inferSelect;
+export type CraftingRecipe = typeof craftingRecipes.$inferSelect;
+export type InsertCraftingRecipe = z.infer<typeof insertCraftingRecipeSchema>;
+export type IslandState = typeof islandState.$inferSelect;
+export type UserProfile = typeof userProfiles.$inferSelect;
+export type Notification = typeof notifications.$inferSelect;
+export type AchievementDef = typeof achievementsDef.$inferSelect;
+export type CloudSave = typeof cloudSaves.$inferSelect;
+export type PvpLobby = typeof pvpLobbies.$inferSelect;
+export type PvpMatch = typeof pvpMatches.$inferSelect;
+export type PvpRating = typeof pvpRatings.$inferSelect;
+export type MobaHero = typeof mobaHeroes.$inferSelect;
+export type InsertMobaHero = z.infer<typeof insertMobaHeroSchema>;
+export type MobaAbility = typeof mobaAbilities.$inferSelect;
+export type MobaItem = typeof mobaItems.$inferSelect;
+export type DungeonRun = typeof dungeonRuns.$inferSelect;
+export type MobaMatchResult = typeof mobaMatchResults.$inferSelect;
+export type PlayerIsland = typeof playerIslands.$inferSelect;
+export type LauncherVersion = typeof launcherVersions.$inferSelect;
+export type ComputerRegistration = typeof computerRegistrations.$inferSelect;
+export type GrudgeDevice = typeof grudgeDevices.$inferSelect;
+export type Asset = typeof assets.$inferSelect;
+export type ArenaTeam = typeof arenaTeams.$inferSelect;
+export type ArenaBattle = typeof arenaBattles.$inferSelect;
+export type CharacterNft = typeof characterNfts.$inferSelect;
+export type InsertCharacterNft = z.infer<typeof insertCharacterNftSchema>;

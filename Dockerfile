@@ -3,13 +3,13 @@ FROM node:20-alpine AS build
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN npm ci --include=dev
 
 COPY tsconfig.json drizzle.config.ts ./
 COPY server ./server
 COPY shared ./shared
 
-RUN npm run build
+RUN npx esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist
 
 # ── Stage 2: Production ────────────────────────────────────────
 FROM node:20-alpine

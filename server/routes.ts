@@ -30,39 +30,21 @@ import missionsRouter from "./routes/missions.js";
 import combatRouter from "./routes/combat.js";
 import crewsRouter from "./routes/crews.js";
 import craftingRouter from "./routes/crafting.js";
+import aiRouter from "./routes/ai.js";
 
 // ============================================
 // GAME CONSTANTS
 // ============================================
 
-const CLASSES = {
-  WARRIOR: "warrior",
-  MAGE: "mage",
-  RANGER: "ranger",
-  ROGUE: "rogue",
-  WORGE: "worge",
-} as const;
-
-const RACES = {
-  HUMAN: "human",
-  TRANDOSHAN: "trandoshan",
-  TWILEK: "twilek",
-  BOTHAN: "bothan",
-  ZABRAK: "zabrak",
-  RODIAN: "rodian",
-  MONCAL: "moncal",
-  WOOKIEE: "wookiee",
-  SULLUSTAN: "sullustan",
-  ITHORIAN: "ithorian",
-} as const;
-
-const WEAPON_TYPES = [
-  "sword", "2h_sword", "shield", "dagger", "mace", "hammer",
-  "staff", "wand", "bow", "crossbow", "gun", "spear",
-  "tome", "off_hand_relic", "cape", "2h_weapon", "thrown",
-] as const;
-
-const FACTIONS = ["order", "chaos", "neutral"] as const;
+// ── Canonical Game Data (shared with all frontends) ──
+import {
+  RACES, FACTIONS, RACE_LIST, VALID_RACE_IDS,
+  type RaceId, type FactionId, type AttributeKey,
+} from "../shared/gameData/races.js";
+import {
+  CLASSES, CLASS_LIST, VALID_CLASS_IDS, CLASS_TIERS,
+  buildPrefabId, type ClassId,
+} from "../shared/gameData/classes.js";
 
 const SPAWN_LOCATIONS = {
   naboo: { theed: { x: -4856, y: 6, z: 4162 }, moenia: { x: 4732, y: 4, z: -4677 } },
@@ -400,11 +382,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
           classId = "warrior",
           raceId = "human",
           profession,
+          manualAttributes,  // Optional: player-allocated points from creation UI
         } = req.body;
         const userId = req.user!.userId;
 
         if (!name) {
           return res.status(400).json({ error: "Character name required" });
+        }
+
+        // Validate race + class against canonical data
+        if (!VALID_RACE_IDS.includes(raceId as RaceId)) {
+          return res.status(400).json({ error: `Invalid race: ${raceId}. Valid: ${VALID_RACE_IDS.join(", ")}` });
+        }
+        if (!VALID_CLASS_IDS.includes(classId as ClassId)) {
+          return res.status(400).json({ error: `Invalid class: ${classId}. Valid: ${VALID_CLASS_IDS.join(", ")}` });
         }
 
         // Check character limit (5 per user)
@@ -417,29 +408,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return res.status(400).json({ error: "Character limit (5) reached" });
         }
 
-        const defaultAttributes = {
-          Strength: 10,
-          Vitality: 10,
-          Endurance: 10,
-          Intellect: 10,
-          Wisdom: 10,
-          Dexterity: 10,
-          Agility: 10,
-          Tactics: 10,
-        };
+        // Calculate attributes: base(10) + race bonuses + class starting + manual allocation
+        const raceDef = RACES[raceId as RaceId];
+        const classDef = CLASSES[classId as ClassId];
+        const BASE = 10;
+        const attrKeys: AttributeKey[] = ["Strength", "Vitality", "Endurance", "Intellect", "Wisdom", "Dexterity", "Agility", "Tactics"];
+        const computedAttributes: Record<string, number> = {};
+        for (const key of attrKeys) {
+          computedAttributes[key] = BASE
+            + (raceDef.bonuses[key] || 0)
+            + (classDef.startingAttributes[key] || 0)
+            + ((manualAttributes && manualAttributes[key]) || 0);
+        }
 
         const defaultEquipment = {
-          head: null,
-          chest: null,
-          legs: null,
-          feet: null,
-          hands: null,
-          shoulders: null,
-          mainHand: null,
-          offHand: null,
-          accessory1: null,
-          accessory2: null,
+          head: null, chest: null, legs: null, feet: null,
+          hands: null, shoulders: null,
+          mainHand: null, offHand: null,
+          accessory1: null, accessory2: null,
         };
+
+        const prefabId = buildPrefabId(raceId, classId);
 
         const [character] = await db
           .insert(characters)
@@ -449,8 +438,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
             classId,
             raceId,
             profession: profession || null,
-            attributes: defaultAttributes,
+            attributes: computedAttributes,
             equipment: defaultEquipment,
+            factionId: raceDef.faction,
+            prefabId,
+            gameOrigin: req.body.gameOrigin || "grudge-wars",
+            weaponSkills: {},
           })
           .returning();
 
@@ -464,7 +457,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
         }
 
-        res.status(201).json({ success: true, character, cnft });
+        const grudgeId = generateGrudgeId(userId);
+        res.status(201).json({
+          success: true,
+          character: { ...character, prefabId },
+          cnft,
+          faction: raceDef.faction,
+          grudgeId,
+        });
       } catch (error) {
         console.error("Create character error:", error);
         res.status(500).json({ error: "Server error" });
@@ -607,6 +607,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     }
   );
+
+  // ---------- GAME DATA (public, no auth needed) ----------
+
+  app.get("/api/game-data/races", (_req, res) => {
+    res.json({ success: true, races: RACE_LIST, factions: FACTIONS });
+  });
+
+  app.get("/api/game-data/classes", (_req, res) => {
+    res.json({ success: true, classes: CLASS_LIST, tiers: CLASS_TIERS });
+  });
+
+  app.get("/api/game-data/all", (_req, res) => {
+    res.json({
+      success: true,
+      races: RACE_LIST,
+      classes: CLASS_LIST,
+      factions: FACTIONS,
+      tiers: CLASS_TIERS,
+      validRaceIds: VALID_RACE_IDS,
+      validClassIds: VALID_CLASS_IDS,
+    });
+  });
 
   // ---------- ISLANDS ----------
 
@@ -782,6 +804,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.use("/api/missions", missionsRouter);
   app.use("/api/combat", combatRouter);
   app.use("/api/crews", crewsRouter);
+
+  // ---------- AI AGENT ----------
+
+  app.use("/api/ai", aiRouter);
+  app.use("/ai", aiRouter); // legacy compat: /ai/* without /api prefix
 
   // ---------- STUDIO SYNC ----------
 
