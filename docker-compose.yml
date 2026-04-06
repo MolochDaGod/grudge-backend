@@ -23,9 +23,14 @@ services:
   api:
     build: .
     restart: unless-stopped
+    container_name: grudge-backend
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      default:
+        aliases:
+          - grudge-backend
     environment:
       DATABASE_URL: postgresql://grudge:${DB_PASSWORD:?DB_PASSWORD is required}@postgres:5432/grudge_game
       PORT: "5000"
