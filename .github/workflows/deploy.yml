@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/grudge-backend
@@ -16,6 +20,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
 
     steps:
       - name: Checkout
@@ -44,15 +50,22 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      packages: read
 
     steps:
       - name: Deploy to GRUDA VPS via docker-compose
         uses: appleboy/ssh-action@v1
         env:
+          IMAGE_TAG: sha-${{ github.sha }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
@@ -61,12 +74,13 @@ jobs:
           CROSSMINT_COLLECTION_ISLANDS: ${{ secrets.CROSSMINT_COLLECTION_ISLANDS }}
           DISCORD_CLIENT_ID: ${{ secrets.DISCORD_CLIENT_ID }}
           DISCORD_CLIENT_SECRET: ${{ secrets.DISCORD_CLIENT_SECRET }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: DB_PASSWORD,JWT_SECRET,CLOUDFLARE_TUNNEL_TOKEN,CROSSMINT_API_KEY,CROSSMINT_COLLECTION_CHARACTERS,CROSSMINT_COLLECTION_ISLANDS,DISCORD_CLIENT_ID,DISCORD_CLIENT_SECRET,GEMINI_API_KEY
+          envs: IMAGE_TAG,DB_PASSWORD,JWT_SECRET,CLOUDFLARE_TUNNEL_TOKEN,CROSSMINT_API_KEY,CROSSMINT_COLLECTION_CHARACTERS,CROSSMINT_COLLECTION_ISLANDS,DISCORD_CLIENT_ID,DISCORD_CLIENT_SECRET,ANTHROPIC_API_KEY,GEMINI_API_KEY
           script: |
             set -e
             DEPLOY_DIR=/opt/grudge-backend
@@ -79,41 +93,41 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
 
-            # Write production .env from GitHub Secrets
-            cat > .env << EOF
-            DB_PASSWORD=${DB_PASSWORD}
-            JWT_SECRET=${JWT_SECRET}
-            CLOUDFLARE_TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
-            CROSSMINT_API_KEY=${CROSSMINT_API_KEY}
-            CROSSMINT_COLLECTION_CHARACTERS=${CROSSMINT_COLLECTION_CHARACTERS:-grudge-characters}
-            CROSSMINT_COLLECTION_ISLANDS=${CROSSMINT_COLLECTION_ISLANDS:-grudge-islands}
-            DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID}
-            DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET}
-            DISCORD_REDIRECT_URI=https://api.grudge-studio.com/auth/discord/callback
-            GEMINI_API_KEY=${GEMINI_API_KEY}
-            CORS_ORIGINS=https://grudgewarlords.com,https://www.grudgewarlords.com,https://grudge-studio.com,https://grudgestudio.com,https://dash.grudge-studio.com,https://grudge-platform.vercel.app,https://warlord-crafting-suite.vercel.app,https://gdevelop-assistant.vercel.app,https://grudachain-rho.vercel.app,https://gruda-wars.vercel.app,https://molochdagod.github.io,http://localhost:5173
-            FRONTEND_URL=https://grudgewarlords.com
-            EOF
-            # Remove leading whitespace from heredoc
-            sed -i 's/^[[:space:]]*//' .env
+            # Write production .env — one key per echo, no heredoc indentation issues
+            {
+              echo "IMAGE_TAG=${IMAGE_TAG}"
+              echo "DB_PASSWORD=${DB_PASSWORD}"
+              echo "JWT_SECRET=${JWT_SECRET}"
+              echo "CLOUDFLARE_TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}"
+              echo "CROSSMINT_API_KEY=${CROSSMINT_API_KEY}"
+              echo "CROSSMINT_COLLECTION_CHARACTERS=${CROSSMINT_COLLECTION_CHARACTERS:-grudge-characters}"
+              echo "CROSSMINT_COLLECTION_ISLANDS=${CROSSMINT_COLLECTION_ISLANDS:-grudge-islands}"
+              echo "DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID}"
+              echo "DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET}"
+              echo "DISCORD_REDIRECT_URI=https://api.grudge-studio.com/auth/discord/callback"
+              echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}"
+              echo "GEMINI_API_KEY=${GEMINI_API_KEY}"
+              echo "CORS_ORIGINS=https://grudgewarlords.com,https://www.grudgewarlords.com,https://grudge-studio.com,https://grudgestudio.com,https://dash.grudge-studio.com,https://grudge-platform.vercel.app,https://warlord-crafting-suite.vercel.app,https://gdevelop-assistant.vercel.app,https://grudachain-rho.vercel.app,https://gruda-wars.vercel.app,https://molochdagod.github.io,http://localhost:5173"
+              echo "FRONTEND_URL=https://grudgewarlords.com"
+            } > .env
 
-            # Build and deploy all services (postgres + api + cloudflared)
-            docker compose build --no-cache api
+            # Pull pre-built image from GHCR (built by build-and-push job above)
+            docker compose pull api
             docker compose up -d
 
-            # Wait for API to become healthy
-            echo "Waiting for API health check..."
-            sleep 15
-            for i in 1 2 3 4 5; do
-              if docker compose exec -T api wget -qO- http://localhost:5000/api/health; then
-                echo ""
-                echo "✅ Grudge Backend deployed successfully"
+            # Health check with retries
+            echo "Waiting for API to become healthy..."
+            sleep 10
+            for i in $(seq 1 6); do
+              if docker compose exec -T api wget -qO- http://localhost:5000/api/health > /dev/null 2>&1; then
+                echo "✅ Deploy successful (attempt $i)"
+                docker compose ps
                 exit 0
               fi
-              echo "  Attempt $i/5 — retrying in 5s..."
+              echo "  Attempt $i/6 — retrying in 5s..."
               sleep 5
             done
 
-            echo "⚠️  Health check did not pass — check logs with: docker compose logs api"
-            docker compose logs --tail=30 api
+            echo "⚠️  Health check failed — logs:"
+            docker compose logs --tail=50 api
             exit 1
