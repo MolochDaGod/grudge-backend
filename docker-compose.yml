@@ -50,7 +50,7 @@ services:
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
       DISCORD_REDIRECT_URI: ${DISCORD_REDIRECT_URI:-https://api.grudge-studio.com/auth/discord/callback}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      CORS_ORIGINS: ${CORS_ORIGINS:-https://grudgewarlords.com,https://grudge-studio.com,https://dash.grudge-studio.com,https://warlord-crafting-suite.vercel.app,https://gdevelop-assistant.vercel.app,https://grudachain-rho.vercel.app,http://localhost:5173}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://grudgewarlords.com,https://www.grudgewarlords.com,https://grudge-studio.com,https://grudgestudio.com,https://client.grudge-studio.com,https://dash.grudge-studio.com,https://warlord-crafting-suite.vercel.app,https://gdevelop-assistant.vercel.app,https://grudachain-rho.vercel.app,https://grudachain.grudgestudio.com,https://gruda-wars.vercel.app,https://grudge-engine-web.vercel.app,https://starwaygruda-webclient-as2n.vercel.app,https://grim-armada-web.vercel.app,https://grudge-angeler.vercel.app,https://grudge-rts.vercel.app,https://grudge-space-rts.vercel.app,https://grudge-studio-dash.vercel.app,https://nexus-nemesis-game.vercel.app,https://grudge-pvp-server.vercel.app,https://grudge-origins.vercel.app,https://the-engine-grudgenexus.vercel.app,https://grudge-platform.vercel.app,https://grudgeplatform.com,https://www.grudgeplatform.com,https://grudgeplatform.io,https://www.grudgeplatform.io,https://dungeon-crawler-quest.vercel.app,https://molochdagod.github.io,https://app.puter.com,http://localhost:5173}
       FRONTEND_URL: ${FRONTEND_URL:-https://grudgewarlords.com}
     # No port binding — cloudflared handles all inbound traffic
     expose:
