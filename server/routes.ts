@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { eq } from "drizzle-orm";
 import crypto from "crypto";
-import { db } from "./db.js";
+import { db, pool } from "./db.js";
 import { users, characters, islands } from "../shared/schema.js";
 import { mintCharacterCNFT, mintIslandCNFT } from "./lib/crossmint.js";
 import {
@@ -873,11 +873,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // ---------- HEALTH ----------
 
-  app.get("/api/health", (_req, res) => {
-    res.json({
-      status: "healthy",
+  app.get("/api/health", async (_req, res) => {
+    let dbOk = false;
+    let dbLatencyMs = 0;
+    try {
+      const t0 = Date.now();
+      await pool.query("SELECT 1");
+      dbLatencyMs = Date.now() - t0;
+      dbOk = true;
+    } catch { /* db unreachable */ }
+
+    const healthy = dbOk;
+    res.status(healthy ? 200 : 503).json({
+      status: healthy ? "healthy" : "degraded",
       service: "Grudge Studio Unified Backend",
       timestamp: new Date().toISOString(),
+      uptime: Math.floor(process.uptime()),
+      checks: {
+        database: { ok: dbOk, latencyMs: dbLatencyMs },
+        websocket: { ok: true },
+      },
       features: {
         api: true,
         auth: {
@@ -887,11 +902,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
           discord: !!DISCORD_CONFIG.clientId,
           google: !!GOOGLE_CONFIG.clientId,
           github: !!GITHUB_CONFIG.clientId,
-          wallet: true,       // Phantom / Solflare / Backpack (Ed25519)
-          web3auth: true,     // Social → Solana via Web3Auth (frontend)
-          crossmint: !!process.env.CROSSMINT_API_KEY, // Custodial server-side wallet
+          wallet: true,
+          web3auth: true,
+          crossmint: !!process.env.CROSSMINT_API_KEY,
         },
-        websocket: true,
         ai: !!process.env.GEMINI_API_KEY,
         walletAuth: true,
         studioSync: true,

@@ -11,9 +11,11 @@ COPY shared ./shared
 
 RUN npx esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist
 
-# ── Stage 2: Production ────────────────────────────────────────
+# ── Stage 2: Production ─────────────────────────────────────────────────
 FROM node:20-alpine
 WORKDIR /app
+
+RUN apk add --no-cache curl
 
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev && npm install drizzle-kit
@@ -23,6 +25,9 @@ COPY shared ./shared
 COPY drizzle.config.ts ./
 
 EXPOSE 5000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD curl -sf http://localhost:5000/api/health || exit 1
 
 # Run DB migration then start server
 CMD ["sh", "-c", "npx drizzle-kit push --config=drizzle.config.ts && node dist/index.js"]
