@@ -74,13 +74,21 @@ jobs:
           CROSSMINT_COLLECTION_ISLANDS: ${{ secrets.CROSSMINT_COLLECTION_ISLANDS }}
           DISCORD_CLIENT_ID: ${{ secrets.DISCORD_CLIENT_ID }}
           DISCORD_CLIENT_SECRET: ${{ secrets.DISCORD_CLIENT_SECRET }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GITHUB_CLIENT_ID_OAUTH: ${{ secrets.GITHUB_CLIENT_ID_OAUTH }}
+          GITHUB_CLIENT_SECRET_OAUTH: ${{ secrets.GITHUB_CLIENT_SECRET_OAUTH }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PUTER_API_TOKEN: ${{ secrets.PUTER_API_TOKEN }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          envs: IMAGE_TAG,DB_PASSWORD,JWT_SECRET,CLOUDFLARE_TUNNEL_TOKEN,CROSSMINT_API_KEY,CROSSMINT_COLLECTION_CHARACTERS,CROSSMINT_COLLECTION_ISLANDS,DISCORD_CLIENT_ID,DISCORD_CLIENT_SECRET,ANTHROPIC_API_KEY,GEMINI_API_KEY
+          envs: IMAGE_TAG,DB_PASSWORD,JWT_SECRET,CLOUDFLARE_TUNNEL_TOKEN,CROSSMINT_API_KEY,CROSSMINT_COLLECTION_CHARACTERS,CROSSMINT_COLLECTION_ISLANDS,DISCORD_CLIENT_ID,DISCORD_CLIENT_SECRET,GOOGLE_CLIENT_ID,GOOGLE_CLIENT_SECRET,GITHUB_CLIENT_ID_OAUTH,GITHUB_CLIENT_SECRET_OAUTH,ANTHROPIC_API_KEY,GEMINI_API_KEY,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,PUTER_API_TOKEN
           script: |
             set -e
             DEPLOY_DIR=/opt/grudge-backend
@@ -105,8 +113,21 @@ jobs:
               echo "DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID}"
               echo "DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET}"
               echo "DISCORD_REDIRECT_URI=https://api.grudge-studio.com/auth/discord/callback"
+              echo "GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}"
+              echo "GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}"
+              echo "GOOGLE_REDIRECT_URI=https://api.grudge-studio.com/auth/google/callback"
+              echo "GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID_OAUTH}"
+              echo "GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET_OAUTH}"
+              echo "GITHUB_REDIRECT_URI=https://api.grudge-studio.com/auth/github/callback"
               echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}"
               echo "GEMINI_API_KEY=${GEMINI_API_KEY}"
+              echo "R2_ACCOUNT_ID=${R2_ACCOUNT_ID:-ee475864561b02d4588180b8b9acf694}"
+              echo "R2_S3_ENDPOINT=https://${R2_ACCOUNT_ID:-ee475864561b02d4588180b8b9acf694}.r2.cloudflarestorage.com"
+              echo "R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}"
+              echo "R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}"
+              echo "R2_BUCKET=grudge-assets"
+              echo "R2_PUBLIC_URL=https://assets.grudge-studio.com"
+              echo "PUTER_API_TOKEN=${PUTER_API_TOKEN}"
               echo "CORS_ORIGINS=https://grudgewarlords.com,https://www.grudgewarlords.com,https://grudge-studio.com,https://grudgestudio.com,https://client.grudge-studio.com,https://dash.grudge-studio.com,https://warlord-crafting-suite.vercel.app,https://gdevelop-assistant.vercel.app,https://grudachain-rho.vercel.app,https://grudachain.grudgestudio.com,https://gruda-wars.vercel.app,https://grudge-engine-web.vercel.app,https://starwaygruda-webclient-as2n.vercel.app,https://grim-armada-web.vercel.app,https://grudge-angeler.vercel.app,https://grudge-rts.vercel.app,https://grudge-space-rts.vercel.app,https://grudge-studio-dash.vercel.app,https://nexus-nemesis-game.vercel.app,https://grudge-pvp-server.vercel.app,https://grudge-origins.vercel.app,https://the-engine-grudgenexus.vercel.app,https://grudge-platform.vercel.app,https://grudgeplatform.com,https://www.grudgeplatform.com,https://grudgeplatform.io,https://www.grudgeplatform.io,https://dungeon-crawler-quest.vercel.app,https://molochdagod.github.io,https://app.puter.com,http://localhost:5173"
               echo "FRONTEND_URL=https://grudgewarlords.com"
             } > .env
