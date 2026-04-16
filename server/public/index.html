@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign In | Grudge Studio</title>
+  <meta name="description" content="Grudge Studio — Sign in to your GRUDGE ID">
+  <link rel="icon" type="image/png" href="https://warlord-crafting-suite.vercel.app/grudge-logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&family=Inter:wght@300;400;500;600;700&family=Jost:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://grudgewarlords.com/grudge-auth-modal.css">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      background: linear-gradient(135deg, #0c0a09 0%, #1c1917 40%, #0c0a09 100%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-family: 'Inter', 'Jost', sans-serif;
+      color: #a8a29e;
+      overflow: hidden;
+    }
+    /* Subtle background pattern */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse at 20% 20%, rgba(180,83,9,0.06) 0%, transparent 50%),
+        radial-gradient(ellipse at 80% 80%, rgba(120,53,15,0.04) 0%, transparent 50%);
+      pointer-events: none;
+    }
+    .auth-landing {
+      position: relative;
+      z-index: 1;
+      text-align: center;
+      padding: 2rem;
+      animation: fadeIn 0.6s ease;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+    .auth-logo {
+      width: 80px;
+      height: 80px;
+      border-radius: 12px;
+      margin-bottom: 1rem;
+      filter: drop-shadow(0 0 20px rgba(217,119,6,0.3));
+    }
+    .auth-title {
+      font-family: 'Cinzel', serif;
+      font-weight: 900;
+      font-size: 2.5rem;
+      background: linear-gradient(135deg, #fbbf24, #d97706, #b45309);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      letter-spacing: 0.1em;
+    }
+    .auth-subtitle {
+      font-family: 'Cinzel', serif;
+      font-size: 0.85rem;
+      color: #78716c;
+      letter-spacing: 0.25em;
+      margin-top: 4px;
+      text-transform: uppercase;
+    }
+    .auth-desc {
+      margin-top: 1.2rem;
+      font-size: 0.9rem;
+      color: #a8a29e;
+      max-width: 360px;
+    }
+    .auth-btn {
+      margin-top: 2rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 40px;
+      border: none;
+      border-radius: 10px;
+      font-family: 'Cinzel', serif;
+      font-weight: 700;
+      font-size: 1rem;
+      letter-spacing: 0.15em;
+      color: #0c0a09;
+      background: linear-gradient(135deg, #b45309, #d97706, #fbbf24);
+      cursor: pointer;
+      transition: all 0.2s;
+      box-shadow: 0 4px 20px rgba(217,119,6,0.3);
+    }
+    .auth-btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 30px rgba(217,119,6,0.4);
+    }
+    .auth-footer {
+      position: fixed;
+      bottom: 1.5rem;
+      font-size: 0.75rem;
+      color: #57534e;
+    }
+    .auth-footer a { color: #78716c; text-decoration: none; }
+    .auth-footer a:hover { color: #d97706; }
+  </style>
+</head>
+<body>
+  <div class="auth-landing">
+    <img src="https://warlord-crafting-suite.vercel.app/grudge-logo.png" alt="Grudge Studio" class="auth-logo"
+         onerror="this.style.display='none'">
+    <h1 class="auth-title">GRUDGE</h1>
+    <p class="auth-subtitle">Identity & Authentication</p>
+    <p class="auth-desc">
+      Your GRUDGE ID is your gaming passport across all Grudge Studio games and services.
+    </p>
+    <button class="auth-btn" onclick="openGrudgeAuthModal()">
+      SIGN IN
+    </button>
+  </div>
+  <div class="auth-footer">
+    <a href="https://grudgewarlords.com">grudgewarlords.com</a> &nbsp;·&nbsp;
+    <a href="https://grudge-studio.com">grudge-studio.com</a> &nbsp;·&nbsp;
+    Racalvin The Pirate King
+  </div>
+
+  <!-- Puter SDK for cloud auth -->
+  <script src="https://js.puter.com/v2/" defer></script>
+
+  <!-- Universal Grudge Auth Modal -->
+  <script>
+    // Pick up return URL from query params
+    (function() {
+      var params = new URLSearchParams(window.location.search);
+      var returnUrl = params.get('return') || params.get('redirect_uri') || params.get('callback') || '';
+      // Configure modal
+      window.GRUDGE_AUTH_RETURN = returnUrl || 'https://grudgewarlords.com/home';
+    })();
+  </script>
+  <script src="https://grudgewarlords.com/grudge-auth-modal.js"></script>
+  <script>
+    // Auto-open modal if ?login=1 or ?return= is set
+    window.addEventListener('DOMContentLoaded', function() {
+      var params = new URLSearchParams(window.location.search);
+      if (params.get('login') === '1' || params.get('return') || params.get('redirect_uri')) {
+        setTimeout(function() { if (window.openGrudgeAuthModal) openGrudgeAuthModal(); }, 400);
+      }
+    });
+  </script>
+</body>
+</html>
