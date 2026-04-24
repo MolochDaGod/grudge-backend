@@ -1,14 +1,29 @@
 /**
- * ALE - Grudge Studio Edge AI Gateway
+ * ALE - Grudge Studio Edge AI Gateway & Legion Hub
  * Cloudflare Worker — ai.grudge-studio.com / grudge-ai-hub.grudge.workers.dev
  *
  * Routes:
- *   GET  /              - Status + available endpoints
- *   POST /ai/chat       - Anthropic Claude proxy
- *   POST /ai/complete   - OpenAI proxy
- *   POST /ai/cf         - Cloudflare Workers AI (llama-3, etc.)
- *   ANY  /api/*         - Proxy to Grudge Backend (api.grudge-studio.com)
- *   GET  /health        - Backend health relay
+ *   GET  /                       - Status + available endpoints
+ *   POST /ai/chat                - Anthropic Claude proxy
+ *   POST /ai/complete            - OpenAI proxy
+ *   POST /ai/cf                  - Cloudflare Workers AI (llama-3, etc.)
+ *   ANY  /api/*                  - Proxy to Grudge Backend
+ *   GET  /health                 - Backend health relay
+ *
+ * Legion AI Hub:
+ *   POST /debug/log              - Structured debug logging (KV-backed)
+ *   GET  /debug/logs             - Retrieve recent debug logs
+ *   GET  /accounts/:grudgeId     - Account info proxy to backend
+ *   POST /legion/dispatch        - Dispatch AI agent tasks (KV job queue)
+ *   GET  /legion/status          - Active agent task status
+ *
+ * ObjectStore API:
+ *   GET  /v1/assets              - List R2 objects
+ *   GET  /v1/assets/:id          - Single asset metadata
+ *   GET  /v1/assets/:id/file     - Redirect to CDN
+ *   POST /assets/upload          - Reserve upload key
+ *   PUT  /assets/upload?key=...  - Stream file to R2
+ *   GET  /assets/list            - List assets by prefix
  */
 
 // Minimal type shim for the Workers AI binding
@@ -504,6 +519,144 @@ async function proxyToBackend(
 }
 
 // ============================================
+// LEGION AI HUB — Debug, Accounts, Task Dispatch
+// ============================================
+
+/** POST /debug/log — store structured debug entries in KV */
+async function handleDebugLog(request: Request, env: Env): Promise<Response> {
+  if (!env.RATE_LIMIT) return Response.json({ error: "KV not configured" }, { status: 503 });
+
+  const body = (await request.json()) as {
+    level?: string;
+    source?: string;
+    message: string;
+    data?: unknown;
+  };
+
+  if (!body.message) return Response.json({ error: "message required" }, { status: 400 });
+
+  const ts = Date.now();
+  const entry = {
+    timestamp: new Date(ts).toISOString(),
+    level: body.level || "info",
+    source: body.source || "unknown",
+    message: body.message,
+    data: body.data || null,
+  };
+
+  const key = `debug:${ts}:${Math.random().toString(36).slice(2, 8)}`;
+  await env.RATE_LIMIT.put(key, JSON.stringify(entry), { expirationTtl: 86400 }); // 24h TTL
+
+  return Response.json({ success: true, key, entry });
+}
+
+/** GET /debug/logs?limit=50&source=worker — retrieve recent debug logs */
+async function handleDebugLogs(request: Request, env: Env): Promise<Response> {
+  if (!env.RATE_LIMIT) return Response.json({ error: "KV not configured" }, { status: 503 });
+
+  const url = new URL(request.url);
+  const limit = Math.min(parseInt(url.searchParams.get("limit") || "50"), 200);
+  const sourceFilter = url.searchParams.get("source") || "";
+
+  const listed = await env.RATE_LIMIT.list({ prefix: "debug:", limit: limit * 2 });
+  const entries: unknown[] = [];
+
+  for (const key of listed.keys.slice(0, limit * 2)) {
+    if (entries.length >= limit) break;
+    const val = await env.RATE_LIMIT.get(key.name);
+    if (!val) continue;
+    try {
+      const parsed = JSON.parse(val);
+      if (sourceFilter && parsed.source !== sourceFilter) continue;
+      entries.push(parsed);
+    } catch {}
+  }
+
+  return Response.json({ logs: entries, count: entries.length });
+}
+
+/** GET /accounts/:grudgeId — proxy account info from backend */
+async function handleAccountLookup(request: Request, env: Env, grudgeId: string): Promise<Response> {
+  try {
+    const res = await proxyToBackend(request, env, `/api/users/${encodeURIComponent(grudgeId)}`);
+    return new Response(res.body, { status: res.status, headers: res.headers });
+  } catch {
+    return Response.json({ error: "Backend unreachable" }, { status: 502 });
+  }
+}
+
+/** POST /legion/dispatch — queue an AI agent task */
+async function handleLegionDispatch(request: Request, env: Env): Promise<Response> {
+  if (!env.RATE_LIMIT) return Response.json({ error: "KV not configured" }, { status: 503 });
+
+  const body = (await request.json()) as {
+    agent: string;      // e.g. "code", "art", "lore", "balance", "qa", "mission"
+    task: string;       // description of what to do
+    priority?: number;  // 0=low, 1=normal, 2=high
+    context?: unknown;  // arbitrary context payload
+  };
+
+  if (!body.agent || !body.task) {
+    return Response.json({ error: "agent and task required" }, { status: 400 });
+  }
+
+  const taskId = `task:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+  const task = {
+    id: taskId,
+    agent: body.agent,
+    task: body.task,
+    priority: body.priority ?? 1,
+    context: body.context || null,
+    status: "queued",
+    created: new Date().toISOString(),
+    updated: new Date().toISOString(),
+    result: null,
+  };
+
+  await env.RATE_LIMIT.put(taskId, JSON.stringify(task), { expirationTtl: 86400 * 7 }); // 7 day TTL
+
+  // Index by agent for listing
+  const agentKey = `agent:${body.agent}:tasks`;
+  const existing = (await env.RATE_LIMIT.get(agentKey)) || "[]";
+  const taskIds: string[] = JSON.parse(existing);
+  taskIds.unshift(taskId);
+  if (taskIds.length > 100) taskIds.length = 100; // Keep last 100
+  await env.RATE_LIMIT.put(agentKey, JSON.stringify(taskIds), { expirationTtl: 86400 * 7 });
+
+  return Response.json({ success: true, task });
+}
+
+/** GET /legion/status?agent=code — list agent tasks */
+async function handleLegionStatus(request: Request, env: Env): Promise<Response> {
+  if (!env.RATE_LIMIT) return Response.json({ error: "KV not configured" }, { status: 503 });
+
+  const url = new URL(request.url);
+  const agent = url.searchParams.get("agent") || "";
+  const limit = Math.min(parseInt(url.searchParams.get("limit") || "20"), 100);
+
+  if (agent) {
+    const agentKey = `agent:${agent}:tasks`;
+    const raw = (await env.RATE_LIMIT.get(agentKey)) || "[]";
+    const taskIds: string[] = JSON.parse(raw);
+    const tasks: unknown[] = [];
+    for (const tid of taskIds.slice(0, limit)) {
+      const val = await env.RATE_LIMIT.get(tid);
+      if (val) tasks.push(JSON.parse(val));
+    }
+    return Response.json({ agent, tasks, count: tasks.length });
+  }
+
+  // List all agents
+  const agents = ["code", "art", "lore", "balance", "qa", "mission"];
+  const summary: Record<string, number> = {};
+  for (const a of agents) {
+    const raw = (await env.RATE_LIMIT.get(`agent:${a}:tasks`)) || "[]";
+    summary[a] = JSON.parse(raw).length;
+  }
+  return Response.json({ agents: summary });
+}
+
+// ============================================
 // ROUTER
 // ============================================
 
@@ -523,15 +676,36 @@ export default {
     if (path === "/" || path === "") {
       return Response.json(
         {
-          service: "ALE — Grudge Studio Edge AI Gateway",
+          service: "ALE — Grudge Studio Edge AI Gateway & Legion Hub",
           status: "online",
-          version: "2.0.0",
+          version: "3.0.0",
           endpoints: {
-            "POST /ai/chat": "Anthropic Claude (message, system?, model?, max_tokens?)",
-            "POST /ai/complete": "OpenAI GPT (prompt, system?, model?, max_tokens?)",
-            "POST /ai/cf": "Cloudflare Workers AI (message|messages, model?, system?, max_tokens?)",
-            "ANY  /api/*": "Proxy to Grudge Backend",
-            "GET  /health": "Backend health relay",
+            ai: {
+              "POST /ai/chat": "Anthropic Claude",
+              "POST /ai/complete": "OpenAI GPT",
+              "POST /ai/cf": "Cloudflare Workers AI",
+            },
+            legion: {
+              "POST /legion/dispatch": "Queue AI agent task (agent, task, priority?, context?)",
+              "GET  /legion/status": "Agent task status (?agent=code&limit=20)",
+            },
+            debug: {
+              "POST /debug/log": "Store debug entry (level?, source?, message, data?)",
+              "GET  /debug/logs": "Retrieve logs (?limit=50&source=worker)",
+            },
+            accounts: {
+              "GET /accounts/:grudgeId": "Account info proxy",
+            },
+            storage: {
+              "POST /assets/upload": "Reserve upload key",
+              "PUT  /assets/upload?key=...": "Stream file to R2",
+              "GET  /assets/list": "List R2 assets",
+              "GET  /v1/assets": "ObjectStore API (paginated)",
+            },
+            proxy: {
+              "ANY /api/*": "Proxy to Grudge Backend",
+              "GET /health": "Backend health relay",
+            },
           },
           features: {
             anthropic: !!env.ANTHROPIC_API_KEY,
@@ -539,7 +713,10 @@ export default {
             cloudflareAI: !!(env.AI || env.CF_AI_TOKEN),
             r2Storage: !!env.ASSETS,
             rateLimit: !!env.RATE_LIMIT,
+            legionHub: true,
+            gRPC: true,
           },
+          agents: ["code", "art", "lore", "balance", "qa", "mission"],
           timestamp: new Date().toISOString(),
         },
         { headers: cors }
@@ -644,6 +821,41 @@ export default {
         status: res.status,
         headers: { ...Object.fromEntries(res.headers), ...cors },
       });
+    }
+
+    // ---- Legion AI Hub Routes ----
+
+    // Debug logging
+    if (path === "/debug/log" && request.method === "POST") {
+      const res = await handleDebugLog(request, env);
+      return new Response(res.body, { status: res.status, headers: { ...Object.fromEntries(res.headers), ...cors } });
+    }
+    if (path === "/debug/logs" && request.method === "GET") {
+      const res = await handleDebugLogs(request, env);
+      return new Response(res.body, { status: res.status, headers: { ...Object.fromEntries(res.headers), ...cors } });
+    }
+
+    // Account lookup
+    if (path.startsWith("/accounts/") && request.method === "GET") {
+      const grudgeId = path.replace("/accounts/", "");
+      if (!grudgeId) return Response.json({ error: "grudgeId required" }, { status: 400, headers: cors });
+      const res = await handleAccountLookup(request, env, grudgeId);
+      return new Response(res.body, { status: res.status, headers: { ...Object.fromEntries(res.headers), ...cors } });
+    }
+
+    // Legion dispatch & status
+    if (path === "/legion/dispatch" && request.method === "POST") {
+      const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+      const rateCheck = await checkRateLimit(env, `legion:${ip}`, 20, 60);
+      if (!rateCheck.allowed) {
+        return Response.json({ error: "Rate limit exceeded." }, { status: 429, headers: cors });
+      }
+      const res = await handleLegionDispatch(request, env);
+      return new Response(res.body, { status: res.status, headers: { ...Object.fromEntries(res.headers), ...cors } });
+    }
+    if (path === "/legion/status" && request.method === "GET") {
+      const res = await handleLegionStatus(request, env);
+      return new Response(res.body, { status: res.status, headers: { ...Object.fromEntries(res.headers), ...cors } });
     }
 
     // API proxy

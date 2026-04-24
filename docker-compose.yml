@@ -21,11 +21,23 @@ services:
       retries: 5
 
   api:
+    image: ghcr.io/molochdagod/grudge-backend:${IMAGE_TAG:-latest}
     build: .
     restart: unless-stopped
+    container_name: grudge-backend
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+    networks:
+      default:
+        aliases:
+          - grudge-backend
     environment:
       DATABASE_URL: postgresql://grudge:${DB_PASSWORD:?DB_PASSWORD is required}@postgres:5432/grudge_game
       PORT: "5000"
@@ -38,7 +50,7 @@ services:
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
       DISCORD_REDIRECT_URI: ${DISCORD_REDIRECT_URI:-https://api.grudge-studio.com/auth/discord/callback}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      CORS_ORIGINS: ${CORS_ORIGINS:-https://grudgewarlords.com,https://www.grudgewarlords.com,https://client.grudge-studio.com,https://id.grudge-studio.com,https://wcs.grudge-studio.com,https://grudgedot.grudge-studio.com,https://dash.grudge-studio.com,https://ai.grudge-studio.com,https://grudge-studio.com,https://molochdagod.github.io,http://localhost:5173}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://grudgewarlords.com,https://www.grudgewarlords.com,https://grudge-studio.com,https://grudgestudio.com,https://client.grudge-studio.com,https://dash.grudge-studio.com,https://warlord-crafting-suite.vercel.app,https://gdevelop-assistant.vercel.app,https://grudachain-rho.vercel.app,https://grudachain.grudgestudio.com,https://gruda-wars.vercel.app,https://grudge-engine-web.vercel.app,https://starwaygruda-webclient-as2n.vercel.app,https://grim-armada-web.vercel.app,https://grudge-angeler.vercel.app,https://grudge-rts.vercel.app,https://grudge-space-rts.vercel.app,https://grudge-studio-dash.vercel.app,https://nexus-nemesis-game.vercel.app,https://grudge-pvp-server.vercel.app,https://grudge-origins.vercel.app,https://the-engine-grudgenexus.vercel.app,https://grudge-platform.vercel.app,https://grudgeplatform.com,https://www.grudgeplatform.com,https://grudgeplatform.io,https://www.grudgeplatform.io,https://dungeon-crawler-quest.vercel.app,https://molochdagod.github.io,https://app.puter.com,http://localhost:5173}
       FRONTEND_URL: ${FRONTEND_URL:-https://grudgewarlords.com}
     # No port binding — cloudflared handles all inbound traffic
     expose:
@@ -53,10 +65,16 @@ services:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     command: tunnel run
     environment:
       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    healthcheck:
+      test: ["CMD", "cloudflared", "tunnel", "--no-autoupdate", "info"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 volumes:
   pgdata:

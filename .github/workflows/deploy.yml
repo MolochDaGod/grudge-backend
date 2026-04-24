@@ -5,9 +5,14 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/grudge-backend
+  DEPLOY_DIR: /opt/grudge-backend
 
 jobs:
   build-and-push:
@@ -15,6 +20,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
 
     steps:
       - name: Checkout
@@ -43,65 +50,105 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      packages: read
 
     steps:
-      - name: Deploy to GRUDA VPS
+      - name: Deploy to GRUDA VPS via docker-compose
         uses: appleboy/ssh-action@v1
+        env:
+          IMAGE_TAG: sha-${{ github.sha }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          CLOUDFLARE_TUNNEL_TOKEN: ${{ secrets.CLOUDFLARE_TUNNEL_TOKEN }}
+          CROSSMINT_API_KEY: ${{ secrets.CROSSMINT_API_KEY }}
+          CROSSMINT_COLLECTION_CHARACTERS: ${{ secrets.CROSSMINT_COLLECTION_CHARACTERS }}
+          CROSSMINT_COLLECTION_ISLANDS: ${{ secrets.CROSSMINT_COLLECTION_ISLANDS }}
+          DISCORD_CLIENT_ID: ${{ secrets.DISCORD_CLIENT_ID }}
+          DISCORD_CLIENT_SECRET: ${{ secrets.DISCORD_CLIENT_SECRET }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GITHUB_CLIENT_ID_OAUTH: ${{ secrets.GITHUB_CLIENT_ID_OAUTH }}
+          GITHUB_CLIENT_SECRET_OAUTH: ${{ secrets.GITHUB_CLIENT_SECRET_OAUTH }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          PUTER_API_TOKEN: ${{ secrets.PUTER_API_TOKEN }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          envs: IMAGE_TAG,DB_PASSWORD,JWT_SECRET,CLOUDFLARE_TUNNEL_TOKEN,CROSSMINT_API_KEY,CROSSMINT_COLLECTION_CHARACTERS,CROSSMINT_COLLECTION_ISLANDS,DISCORD_CLIENT_ID,DISCORD_CLIENT_SECRET,GOOGLE_CLIENT_ID,GOOGLE_CLIENT_SECRET,GITHUB_CLIENT_ID_OAUTH,GITHUB_CLIENT_SECRET_OAUTH,ANTHROPIC_API_KEY,GEMINI_API_KEY,R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY,PUTER_API_TOKEN
           script: |
-            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            docker pull ghcr.io/${{ env.IMAGE_NAME }}:latest
+            set -e
+            DEPLOY_DIR=/opt/grudge-backend
 
-            # Ensure PostgreSQL is running
-            if ! docker ps --format '{{.Names}}' | grep -q '^grudge-postgres$'; then
-              docker volume create grudge-db-data 2>/dev/null || true
-              docker run -d \
-                --name grudge-postgres \
-                --restart unless-stopped \
-                --network grudge-net \
-                -e POSTGRES_DB=grudge_game \
-                -e POSTGRES_USER=grudge \
-                -e POSTGRES_PASSWORD="${{ secrets.DB_PASSWORD }}" \
-                -v grudge-db-data:/var/lib/postgresql/data \
-                postgres:16-alpine
-              sleep 8
+            # Pull latest code
+            if [ ! -d "$DEPLOY_DIR/.git" ]; then
+              git clone https://github.com/MolochDaGod/grudge-backend.git "$DEPLOY_DIR"
             fi
+            cd "$DEPLOY_DIR"
+            git fetch origin main
+            git reset --hard origin/main
 
-            # Deploy API container
-            docker stop grudge-backend 2>/dev/null || true
-            docker rm grudge-backend 2>/dev/null || true
+            # Write production .env — one key per echo, no heredoc indentation issues
+            {
+              echo "IMAGE_TAG=${IMAGE_TAG}"
+              echo "DB_PASSWORD=${DB_PASSWORD}"
+              echo "JWT_SECRET=${JWT_SECRET}"
+              echo "CLOUDFLARE_TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}"
+              echo "CROSSMINT_API_KEY=${CROSSMINT_API_KEY}"
+              echo "CROSSMINT_COLLECTION_CHARACTERS=${CROSSMINT_COLLECTION_CHARACTERS:-grudge-characters}"
+              echo "CROSSMINT_COLLECTION_ISLANDS=${CROSSMINT_COLLECTION_ISLANDS:-grudge-islands}"
+              echo "DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID}"
+              echo "DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET}"
+              echo "DISCORD_REDIRECT_URI=https://api.grudge-studio.com/auth/discord/callback"
+              echo "GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}"
+              echo "GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}"
+              echo "GOOGLE_REDIRECT_URI=https://api.grudge-studio.com/auth/google/callback"
+              echo "GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID_OAUTH}"
+              echo "GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET_OAUTH}"
+              echo "GITHUB_REDIRECT_URI=https://api.grudge-studio.com/auth/github/callback"
+              echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}"
+              echo "GEMINI_API_KEY=${GEMINI_API_KEY}"
+              echo "R2_ACCOUNT_ID=${R2_ACCOUNT_ID:-ee475864561b02d4588180b8b9acf694}"
+              echo "R2_S3_ENDPOINT=https://${R2_ACCOUNT_ID:-ee475864561b02d4588180b8b9acf694}.r2.cloudflarestorage.com"
+              echo "R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}"
+              echo "R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}"
+              echo "R2_BUCKET=grudge-assets"
+              echo "R2_PUBLIC_URL=https://assets.grudge-studio.com"
+              echo "PUTER_API_TOKEN=${PUTER_API_TOKEN}"
+              echo "CORS_ORIGINS=https://grudgewarlords.com,https://www.grudgewarlords.com,https://grudge-studio.com,https://grudgestudio.com,https://client.grudge-studio.com,https://dash.grudge-studio.com,https://warlord-crafting-suite.vercel.app,https://gdevelop-assistant.vercel.app,https://grudachain-rho.vercel.app,https://grudachain.grudgestudio.com,https://gruda-wars.vercel.app,https://grudge-engine-web.vercel.app,https://starwaygruda-webclient-as2n.vercel.app,https://grim-armada-web.vercel.app,https://grudge-angeler.vercel.app,https://grudge-rts.vercel.app,https://grudge-space-rts.vercel.app,https://grudge-studio-dash.vercel.app,https://nexus-nemesis-game.vercel.app,https://grudge-pvp-server.vercel.app,https://grudge-origins.vercel.app,https://the-engine-grudgenexus.vercel.app,https://grudge-platform.vercel.app,https://grudgeplatform.com,https://www.grudgeplatform.com,https://grudgeplatform.io,https://www.grudgeplatform.io,https://dungeon-crawler-quest.vercel.app,https://molochdagod.github.io,https://app.puter.com,http://localhost:5173"
+              echo "FRONTEND_URL=https://grudgewarlords.com"
+            } > .env
 
-            docker network create grudge-net 2>/dev/null || true
+            # Pull pre-built image from GHCR (built by build-and-push job above)
+            docker compose pull api
+            docker compose up -d
 
-            docker run -d \
-              --name grudge-backend \
-              --restart unless-stopped \
-              --network grudge-net \
-              -e DATABASE_URL="postgresql://grudge:${{ secrets.DB_PASSWORD }}@grudge-postgres:5432/grudge_game" \
-              -e PORT=5000 \
-              -e NODE_ENV=production \
-              -e JWT_SECRET="${{ secrets.JWT_SECRET }}" \
-              -e CROSSMINT_API_KEY="${{ secrets.CROSSMINT_API_KEY }}" \
-              -e CROSSMINT_COLLECTION_CHARACTERS="${{ secrets.CROSSMINT_COLLECTION_CHARACTERS }}" \
-              -e CROSSMINT_COLLECTION_ISLANDS="${{ secrets.CROSSMINT_COLLECTION_ISLANDS }}" \
-              -e DISCORD_CLIENT_ID="${{ secrets.DISCORD_CLIENT_ID }}" \
-              -e DISCORD_CLIENT_SECRET="${{ secrets.DISCORD_CLIENT_SECRET }}" \
-              -e DISCORD_REDIRECT_URI="https://api.grudge-studio.com/auth/discord/callback" \
-              -e GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" \
-              -e CORS_ORIGINS="https://grudgewarlords.com,https://www.grudgewarlords.com,https://client.grudge-studio.com,https://id.grudge-studio.com,https://wcs.grudge-studio.com,https://grudgedot.grudge-studio.com,https://dash.grudge-studio.com,https://ai.grudge-studio.com,https://grudge-studio.com,https://molochdagod.github.io,http://localhost:5173" \
-              -e FRONTEND_URL="https://grudgewarlords.com" \
-              ghcr.io/${{ env.IMAGE_NAME }}:latest
-
-            # Wait for API to become healthy before reporting success
-            echo "Waiting for API health check..."
+            # Health check with retries
+            echo "Waiting for API to become healthy..."
             sleep 10
-            docker exec grudge-backend wget -qO- http://localhost:5000/api/health || echo "⚠️  Health check failed — check logs"
+            for i in $(seq 1 6); do
+              if docker compose exec -T api wget -qO- http://localhost:5000/api/health > /dev/null 2>&1; then
+                echo "✅ Deploy successful (attempt $i)"
+                docker compose ps
+                exit 0
+              fi
+              echo "  Attempt $i/6 — retrying in 5s..."
+              sleep 5
+            done
 
-            echo "✅ Grudge Backend deployed"
+            echo "⚠️  Health check failed — logs:"
+            docker compose logs --tail=50 api
+            exit 1

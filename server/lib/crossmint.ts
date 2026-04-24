@@ -2,16 +2,20 @@ import { eq } from "drizzle-orm";
 import { db } from "../db.js";
 import { users, characters, islands } from "../../shared/schema.js";
 import { generateGrudgeId } from "../auth.js";
+import { RACES, FACTIONS, type RaceId, type FactionId } from "../../shared/gameData/races.js";
+import { CLASSES, type ClassId } from "../../shared/gameData/classes.js";
+import { generateHeroAvatar, getFallbackAvatarUrl } from "./avatar-gen.js";
 
 // ============================================
 // CROSSMINT CONFIG
 // ============================================
 
 const CROSSMINT_BASE_URL =
-  process.env.CROSSMINT_BASE_URL || "https://www.crossmint.com/api/v1-alpha2";
+  process.env.CROSSMINT_BASE_URL || "https://www.crossmint.com/api/2022-06-09";
 
+/** Crossmint project: 8410e23e-d003-4061-9b65-7c886a6c46ec */
 const CROSSMINT_COLLECTION_CHARACTERS =
-  process.env.CROSSMINT_COLLECTION_CHARACTERS || "grudge-characters";
+  process.env.CROSSMINT_COLLECTION_CHARACTERS || "5061318d-ff65-4893-ac4b-9b28efb18ace";
 
 const CROSSMINT_COLLECTION_ISLANDS =
   process.env.CROSSMINT_COLLECTION_ISLANDS || "grudge-islands";
@@ -114,6 +118,7 @@ export async function mintCharacterCNFT(characterId: string): Promise<{
 
   // Ensure user has a wallet
   const wallet = await ensureWallet(char.userId);
+  const grudgeId = generateGrudgeId(char.userId);
 
   // Mark as pending
   await db
@@ -121,21 +126,70 @@ export async function mintCharacterCNFT(characterId: string): Promise<{
     .set({ cnftStatus: "pending" })
     .where(eq(characters.id, characterId));
 
+  // Resolve race → faction
+  const raceId = (char.raceId || "human") as RaceId;
+  const raceDef = RACES[raceId];
+  const factionId = raceDef?.faction || "crusade";
+  const factionName = FACTIONS[factionId]?.name || "Crusade";
+  const classId = (char.classId || "warrior") as ClassId;
+  const classDef = CLASSES[classId];
+
+  // Get or generate avatar
+  let imageUrl = char.avatarUrl;
+  if (!imageUrl) {
+    imageUrl = await generateHeroAvatar(
+      char.name,
+      raceDef?.name || raceId,
+      classDef?.name || classId,
+      factionId,
+    );
+    if (imageUrl) {
+      await db.update(characters).set({ avatarUrl: imageUrl }).where(eq(characters.id, characterId));
+    } else {
+      imageUrl = getFallbackAvatarUrl(raceId);
+    }
+  }
+
+  // Read attributes
+  const attrs = (char.attributes as Record<string, number>) || {};
+  const getAttr = (key: string) => attrs[key] || 0;
+
+  // Build complete cNFT metadata (front = image, back = data sheet)
   const metadata = {
     name: `${char.name} — Grudge Warlord`,
     symbol: "GRUDGE",
-    description: `${char.raceId} ${char.classId} of the Grudge Warlords. Level ${char.level || 1}.`,
-    image: char.avatarUrl || `https://molochdagod.github.io/ObjectStore/icons/races/${char.raceId || "human"}.png`,
+    description: `${raceDef?.name || raceId} ${classDef?.name || classId} of the ${factionName}. Level ${char.level || 1}. Created by Racalvin The Pirate King.`,
+    image: imageUrl,
     attributes: [
-      { trait_type: "Race", value: char.raceId || "unknown" },
-      { trait_type: "Class", value: char.classId || "unknown" },
-      { trait_type: "Level", value: String(char.level || 1) },
+      // Identity
+      { trait_type: "Race", value: raceDef?.name || raceId },
+      { trait_type: "Class", value: classDef?.name || classId },
+      { trait_type: "Faction", value: factionName },
+      { trait_type: "Level", value: char.level || 1 },
+      // Core 8 attributes
+      { trait_type: "Strength", value: getAttr("Strength") },
+      { trait_type: "Vitality", value: getAttr("Vitality") },
+      { trait_type: "Endurance", value: getAttr("Endurance") },
+      { trait_type: "Intellect", value: getAttr("Intellect") },
+      { trait_type: "Wisdom", value: getAttr("Wisdom") },
+      { trait_type: "Dexterity", value: getAttr("Dexterity") },
+      { trait_type: "Agility", value: getAttr("Agility") },
+      { trait_type: "Tactics", value: getAttr("Tactics") },
+      // Profession & progression
       { trait_type: "Profession", value: char.profession || "none" },
+      { trait_type: "Experience", value: char.experience || 0 },
+      { trait_type: "Gold", value: char.gold || 0 },
+      // Model
+      { trait_type: "Prefab", value: `${raceId}_${classId}` },
       { trait_type: "Type", value: "Character" },
     ],
     properties: {
+      files: [{ uri: imageUrl, type: "image/png" }],
       category: "character",
-      grudgeId: characterId,
+      grudgeId: grudgeId,
+      characterId: characterId,
+      creator: "Racalvin The Pirate King",
+      studio: "Grudge Studio",
     },
   };
 

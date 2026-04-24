@@ -1,17 +1,46 @@
 [Unit]
 Description=Grudge Studio Unified Backend
-After=network.target postgresql.service
+After=network-online.target postgresql.service
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=grudge
 WorkingDirectory=/opt/grudge-backend
 EnvironmentFile=/opt/grudge-backend/.env
+
+# — Start / Stop —
+ExecStartPre=/usr/bin/node -e "require('pg').Pool({connectionString:process.env.DATABASE_URL}).query('SELECT 1').then(()=>process.exit(0)).catch(()=>process.exit(1))"
 ExecStart=/usr/bin/node dist/index.js
+
+# — Auto-restart —
 Restart=always
 RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# — Health check: restart if health endpoint fails —
+ExecStartPost=/bin/sh -c 'sleep 10 && curl -sf http://localhost:5000/api/health || exit 1'
+WatchdogSec=60
+
+# — Resource limits —
+MemoryMax=1G
+MemoryHigh=768M
+CPUQuota=200%
+LimitNOFILE=65535
+TasksMax=512
+
+# — Logging —
 StandardOutput=journal
 StandardError=journal
+SyslogIdentifier=grudge-backend
+
+# — Security hardening —
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/grudge-backend
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
