@@ -95,7 +95,7 @@ jobs:
               -e DISCORD_CLIENT_SECRET="${{ secrets.DISCORD_CLIENT_SECRET }}" \
               -e DISCORD_REDIRECT_URI="https://api.grudge-studio.com/auth/discord/callback" \
               -e GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" \
-              -e CORS_ORIGINS="https://grudgewarlords.com,https://www.grudgewarlords.com,https://grudge-studio.com,https://grudgestudio.com,https://dash.grudge-studio.com,https://grudge-platform.vercel.app,https://warlord-crafting-suite.vercel.app,https://gdevelop-assistant.vercel.app,https://grudachain-rho.vercel.app,https://gruda-wars.vercel.app,https://molochdagod.github.io,http://localhost:5173" \
+              -e CORS_ORIGINS="https://grudgewarlords.com,https://www.grudgewarlords.com,https://client.grudge-studio.com,https://id.grudge-studio.com,https://wcs.grudge-studio.com,https://grudgedot.grudge-studio.com,https://dash.grudge-studio.com,https://ai.grudge-studio.com,https://grudge-studio.com,https://molochdagod.github.io,http://localhost:5173" \
               -e FRONTEND_URL="https://grudgewarlords.com" \
               ghcr.io/${{ env.IMAGE_NAME }}:latest
 

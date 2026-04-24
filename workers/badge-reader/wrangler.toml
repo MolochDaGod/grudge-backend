@@ -1,0 +1,29 @@
+name = "grudge-badge-reader"
+main = "src/index.ts"
+compatibility_date = "2026-04-24"
+compatibility_flags = ["nodejs_compat"]
+
+# Route is attached in the Cloudflare dashboard after first deploy so that the
+# production Worker does not claim `edge.grudge-studio.com/*` until it's been
+# manually verified. Staging uses the built-in workers.dev subdomain.
+workers_dev = true
+
+# Secrets (set via `npx wrangler secret put <NAME>`):
+#   JWT_SECRET              — 64-char hex string, shared with the backend API
+#   ORIGIN_BASE             — defaults to https://api.grudge-studio.com; override to point elsewhere
+#   AUTH_GATEWAY_BASE       — defaults to https://id.grudge-studio.com
+#   ALLOWED_PREFIXES        — comma-separated list of path prefixes that require auth (e.g. "/admin,/editor,/island")
+#                             If unset, every request is gated. Public pages should be excluded.
+
+[vars]
+ORIGIN_BASE = "https://api.grudge-studio.com"
+AUTH_GATEWAY_BASE = "https://id.grudge-studio.com"
+# Paths that require a valid JWT to proxy. Anything outside these prefixes is
+# forwarded unauthenticated. Override per-env via secret.
+ALLOWED_PREFIXES = "/admin,/editor,/island,/wallet,/characters,/studio/sync"
+
+[observability]
+enabled = true
+
+[placement]
+mode = "smart"

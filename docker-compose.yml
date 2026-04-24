@@ -38,7 +38,7 @@ services:
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
       DISCORD_REDIRECT_URI: ${DISCORD_REDIRECT_URI:-https://api.grudge-studio.com/auth/discord/callback}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      CORS_ORIGINS: ${CORS_ORIGINS:-https://grudgewarlords.com,https://grudge-studio.com,https://dash.grudge-studio.com,https://warlord-crafting-suite.vercel.app,https://gdevelop-assistant.vercel.app,https://grudachain-rho.vercel.app,http://localhost:5173}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://grudgewarlords.com,https://www.grudgewarlords.com,https://client.grudge-studio.com,https://id.grudge-studio.com,https://wcs.grudge-studio.com,https://grudgedot.grudge-studio.com,https://dash.grudge-studio.com,https://ai.grudge-studio.com,https://grudge-studio.com,https://molochdagod.github.io,http://localhost:5173}
       FRONTEND_URL: ${FRONTEND_URL:-https://grudgewarlords.com}
     # No port binding — cloudflared handles all inbound traffic
     expose:

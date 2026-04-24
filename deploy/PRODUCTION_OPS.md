@@ -162,12 +162,13 @@ npx wrangler deploy --cwd workers/ale
 Backend (set via `CORS_ORIGINS` env):
 ```
 https://grudgewarlords.com, https://www.grudgewarlords.com,
-https://grudge-studio.com, https://grudgestudio.com,
-https://dash.grudge-studio.com, https://grudge-platform.vercel.app,
-https://warlord-crafting-suite.vercel.app, https://gdevelop-assistant.vercel.app,
-https://grudachain-rho.vercel.app, https://gruda-wars.vercel.app,
-https://molochdagod.github.io, http://localhost:5173
+https://client.grudge-studio.com, https://id.grudge-studio.com,
+https://wcs.grudge-studio.com, https://grudgedot.grudge-studio.com,
+https://dash.grudge-studio.com, https://ai.grudge-studio.com,
+https://grudge-studio.com, https://molochdagod.github.io,
+http://localhost:5173
 ```
+Note: all legacy `*.vercel.app` production origins have been retired — production traffic is served from Cloudflare Pages under `grudge-studio.com`. Vercel previews are allowed by regex match in `server/index.ts` but are not permitted as prod origins. The former GDevelopAssistant deployment is superseded by the grudgeDot launcher; never re-add any `gdevelop-*` hostname to this list.
 
 R2 CORS (live via API): all above + `https://ai.grudge-studio.com`, `localhost:3000/5000`
 
